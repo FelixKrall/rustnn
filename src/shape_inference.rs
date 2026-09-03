@@ -1950,9 +1950,9 @@ pub fn infer_unsqueeze_shape(input_shape: &[u32], axes: &[u32]) -> Result<Vec<u3
     let input_rank = input_shape.len();
     let output_rank = input_rank + axes.len();
 
-    // Validate axes: must be in range [0, output_rank]
+    // Validate axes: must be in range [0, output_rank).
     for &axis in axes {
-        if axis > output_rank as u32 {
+        if axis >= output_rank as u32 {
             return Err(GraphError::ShapeInferenceFailed {
                 reason: format!(
                     "Unsqueeze axis {} out of bounds for output rank {}, input shape: {:?}",
@@ -1998,7 +1998,7 @@ pub fn infer_unsqueeze_shape_dimensions(
     let output_rank = input_rank + axes.len();
 
     for &axis in axes {
-        if axis > output_rank as u32 {
+        if axis >= output_rank as u32 {
             return Err(GraphError::ShapeInferenceFailed {
                 reason: format!(
                     "Unsqueeze axis {} out of bounds for output rank {}, input shape: {:?}",
