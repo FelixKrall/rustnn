@@ -3102,6 +3102,10 @@ mod test {
             MLOperandDescriptor, MLPowerPreference, MLTensorDescriptor,
         },
         mlgraphbuilder::MLGraphBuilder,
+        operator_options::{
+            MLDimension, MLGemmOptions, MLSplitOptions, MLSqueezeOptions, MLUnsqueezeOptions,
+        },
+        operators::Operation,
     };
 
     #[test]
@@ -3550,5 +3554,262 @@ mod test {
             }
         );
         assert!(!webnn_path.exists());
+    }
+
+    #[test]
+    fn rustnn_saved_shape_operations_reload_and_execute() {
+        let _ = pretty_env_logger::try_init();
+        let context = MLContext::create(&MLContextOptions::new(MLPowerPreference::Default, false));
+        if matches!(context, Err(crate::error::Error::NoBackendAvailable { .. })) {
+            return;
+        }
+        let mut context = context.unwrap();
+        let input_desc = MLOperandDescriptor::new(
+            crate::operator_enums::MLOperandDataType::Float32,
+            vec![1, 4],
+        );
+
+        let mut builder = MLGraphBuilder::new(&mut context).unwrap();
+        let input = builder.input("input", &input_desc).unwrap();
+        let sliced = builder
+            .slice(
+                input,
+                &[0, 0],
+                &[MLDimension::Static(1), MLDimension::Static(2)],
+            )
+            .unwrap();
+        let concatenated = builder.concat(&[sliced, sliced], 1).unwrap();
+        let reshaped = builder
+            .reshape(
+                concatenated,
+                vec![MLDimension::Static(2), MLDimension::Static(2)],
+            )
+            .unwrap();
+        let expanded = builder
+            .unsqueeze_with_options(
+                reshaped,
+                MLUnsqueezeOptions {
+                    axes: vec![0],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let squeezed = builder
+            .squeeze_with_options(
+                expanded,
+                MLSqueezeOptions {
+                    axes: vec![0],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mut named_outputs = MLNamedOperands::new();
+        named_outputs.insert("output", squeezed);
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let webnn_path = temp_dir.path().join("shape-ops.webnn");
+        builder
+            .rustnn_save_webnn(&named_outputs, &webnn_path)
+            .unwrap();
+        drop(builder);
+
+        let text = std::fs::read_to_string(&webnn_path).unwrap();
+        assert!(text.contains("starts=[0, 0]"));
+        assert!(text.contains("sizes=[1, 2]"));
+        assert!(text.contains("axis=1"));
+        assert!(text.contains("newShape=[2, 2]"));
+        assert!(text.contains("unsqueeze("));
+        assert!(text.contains("squeeze("));
+        assert!(text.contains("axes=[0]"));
+
+        let loaded = crate::load_graph_from_path(&webnn_path).unwrap();
+        let output_id = loaded.output_operands[0];
+        assert_eq!(
+            loaded.operands[output_id as usize]
+                .descriptor
+                .static_or_max_shape(),
+            vec![2, 2]
+        );
+        let mut graph = context.rustnn_build_graph(loaded).unwrap();
+
+        let mut input_tensor_desc = MLTensorDescriptor::from_operand_descriptor(&input_desc);
+        input_tensor_desc.set_writable(true);
+        let output_operand_desc = MLOperandDescriptor::new(
+            crate::operator_enums::MLOperandDataType::Float32,
+            vec![2, 2],
+        );
+        let mut output_tensor_desc =
+            MLTensorDescriptor::from_operand_descriptor(&output_operand_desc);
+        output_tensor_desc.set_readable(true);
+        let input_tensor = context.create_tensor(&input_tensor_desc).unwrap();
+        let output_tensor = context.create_tensor(&output_tensor_desc).unwrap();
+        context
+            .write_tensor(&input_tensor, &[1.0f32, 2.0, 3.0, 4.0])
+            .unwrap();
+        let inputs = MLNamedTensors::from([("input", &input_tensor)]);
+        let outputs = MLNamedTensors::from([("output", &output_tensor)]);
+        context.dispatch(&mut graph, &inputs, &outputs).unwrap();
+        let mut actual = vec![0.0f32; 4];
+        context.read_tensor(&output_tensor, &mut actual).unwrap();
+        assert_eq!(actual, vec![1.0, 2.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn rustnn_saved_gemm_bias_reloads_by_operand_name_and_executes() {
+        let _ = pretty_env_logger::try_init();
+        let context = MLContext::create(&MLContextOptions::new(MLPowerPreference::Default, false));
+        if matches!(context, Err(crate::error::Error::NoBackendAvailable { .. })) {
+            return;
+        }
+        let mut context = context.unwrap();
+        let matrix_desc = MLOperandDescriptor::new(
+            crate::operator_enums::MLOperandDataType::Float32,
+            vec![2, 2],
+        );
+        let bias_desc =
+            MLOperandDescriptor::new(crate::operator_enums::MLOperandDataType::Float32, vec![2]);
+
+        let mut builder = MLGraphBuilder::new(&mut context).unwrap();
+        let input = builder.input("input", &matrix_desc).unwrap();
+        let weights = builder
+            .constant_from_slice(&matrix_desc, &[1.0f32, 0.0, 0.0, 1.0])
+            .unwrap();
+        let bias = builder
+            .constant_from_slice(&bias_desc, &[10.0f32, 20.0])
+            .unwrap();
+        let output = builder
+            .gemm_with_options(
+                input,
+                weights,
+                MLGemmOptions {
+                    c: Some(bias.id as u32),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mut named_outputs = MLNamedOperands::new();
+        named_outputs.insert("output", output);
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let webnn_path = temp_dir.path().join("gemm.webnn");
+        builder
+            .rustnn_save_webnn(&named_outputs, &webnn_path)
+            .unwrap();
+        drop(builder);
+
+        let text = std::fs::read_to_string(&webnn_path).unwrap();
+        let gemm_line = text.lines().find(|line| line.contains("gemm(")).unwrap();
+        assert!(gemm_line.contains("c=\"operand_2\""));
+
+        let loaded = crate::load_graph_from_path(&webnn_path).unwrap();
+        let c = loaded
+            .operations
+            .iter()
+            .find_map(|operation| match operation {
+                Operation::Gemm { options, .. } => options.as_ref().and_then(|options| options.c),
+                _ => None,
+            })
+            .expect("reloaded Gemm bias operand");
+        assert_eq!(
+            loaded.operands[c as usize].descriptor.static_or_max_shape(),
+            vec![2]
+        );
+        let mut graph = context.rustnn_build_graph(loaded).unwrap();
+
+        let mut input_tensor_desc = MLTensorDescriptor::from_operand_descriptor(&matrix_desc);
+        input_tensor_desc.set_writable(true);
+        let mut output_tensor_desc = MLTensorDescriptor::from_operand_descriptor(&matrix_desc);
+        output_tensor_desc.set_readable(true);
+        let input_tensor = context.create_tensor(&input_tensor_desc).unwrap();
+        let output_tensor = context.create_tensor(&output_tensor_desc).unwrap();
+        context
+            .write_tensor(&input_tensor, &[1.0f32, 2.0, 3.0, 4.0])
+            .unwrap();
+        let inputs = MLNamedTensors::from([("input", &input_tensor)]);
+        let outputs = MLNamedTensors::from([("output", &output_tensor)]);
+        context.dispatch(&mut graph, &inputs, &outputs).unwrap();
+        let mut actual = vec![0.0f32; 4];
+        context.read_tensor(&output_tensor, &mut actual).unwrap();
+        assert_eq!(actual, vec![11.0, 22.0, 13.0, 24.0]);
+    }
+
+    #[test]
+    fn rustnn_saved_split_outputs_reload_and_execute() {
+        let _ = pretty_env_logger::try_init();
+        let context = MLContext::create(&MLContextOptions::new(MLPowerPreference::Default, false));
+        if matches!(context, Err(crate::error::Error::NoBackendAvailable { .. })) {
+            return;
+        }
+        let mut context = context.unwrap();
+        let input_desc = MLOperandDescriptor::new(
+            crate::operator_enums::MLOperandDataType::Float32,
+            vec![1, 4],
+        );
+
+        let mut builder = MLGraphBuilder::new(&mut context).unwrap();
+        let input = builder.input("input", &input_desc).unwrap();
+        let split = builder
+            .split_with_options(
+                input,
+                &[1, 3],
+                MLSplitOptions {
+                    axis: 1,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mut named_outputs = MLNamedOperands::new();
+        named_outputs.insert("left", split[0]);
+        named_outputs.insert("right", split[1]);
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let webnn_path = temp_dir.path().join("split.webnn");
+        builder
+            .rustnn_save_webnn(&named_outputs, &webnn_path)
+            .unwrap();
+        drop(builder);
+
+        let loaded = crate::load_graph_from_path(&webnn_path).unwrap();
+        let output_shapes = loaded
+            .output_operands
+            .iter()
+            .map(|&id| {
+                loaded.operands[id as usize]
+                    .descriptor
+                    .static_or_max_shape()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(output_shapes, vec![vec![1, 1], vec![1, 3]]);
+        let mut graph = context.rustnn_build_graph(loaded).unwrap();
+
+        let mut input_tensor_desc = MLTensorDescriptor::from_operand_descriptor(&input_desc);
+        input_tensor_desc.set_writable(true);
+        let mut left_desc = MLTensorDescriptor::from_operand_descriptor(&MLOperandDescriptor::new(
+            crate::operator_enums::MLOperandDataType::Float32,
+            vec![1, 1],
+        ));
+        left_desc.set_readable(true);
+        let mut right_desc =
+            MLTensorDescriptor::from_operand_descriptor(&MLOperandDescriptor::new(
+                crate::operator_enums::MLOperandDataType::Float32,
+                vec![1, 3],
+            ));
+        right_desc.set_readable(true);
+        let input_tensor = context.create_tensor(&input_tensor_desc).unwrap();
+        let left_tensor = context.create_tensor(&left_desc).unwrap();
+        let right_tensor = context.create_tensor(&right_desc).unwrap();
+        context
+            .write_tensor(&input_tensor, &[1.0f32, 2.0, 3.0, 4.0])
+            .unwrap();
+        let inputs = MLNamedTensors::from([("input", &input_tensor)]);
+        let outputs = MLNamedTensors::from([("left", &left_tensor), ("right", &right_tensor)]);
+        context.dispatch(&mut graph, &inputs, &outputs).unwrap();
+
+        let mut left = vec![0.0f32; 1];
+        let mut right = vec![0.0f32; 3];
+        context.read_tensor(&left_tensor, &mut left).unwrap();
+        context.read_tensor(&right_tensor, &mut right).unwrap();
+        assert_eq!(left, vec![1.0]);
+        assert_eq!(right, vec![2.0, 3.0, 4.0]);
     }
 }

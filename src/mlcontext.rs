@@ -502,10 +502,7 @@ impl<'context> MLContext<'context> {
     }
 
     /// Build a graph loaded from rustnn's `.webnn`/`.json` formats.
-    pub fn rustnn_build_graph(
-        &mut self,
-        graph: GraphInfo,
-    ) -> Result<MLGraph<'context>> {
+    pub fn rustnn_build_graph(&mut self, graph: GraphInfo) -> Result<MLGraph<'context>> {
         let mut builder = self.backend.create_builder()?;
         builder.build(graph)
     }

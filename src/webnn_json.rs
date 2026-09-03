@@ -24,7 +24,7 @@ use crate::graph::{
 };
 use crate::operator_enums::MLOperandDataType;
 use crate::operators::Operation;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use webnn_graph::ast::{ConstDecl, ConstInit, GraphJson, Node, OperandDesc};
 
 /// The name used for an operand in the exported AST (and, for constants, as the safetensors tensor
@@ -169,11 +169,89 @@ fn graph_operation_to_webnn_node_with_overrides(
     };
 
     let mut options: serde_json::Map<String, serde_json::Value> = operation
-        .attributes_value()
+        .attributes_json_value()
         .as_object()
         .cloned()
         .unwrap_or_else(serde_json::Map::new);
     options.remove("kind");
+    // Operand-valued options cannot be serialized as raw graph-local indices: parsing
+    // declarations and operation outputs can assign different indices on reload. Store
+    // their stable exported names and resolve those names after parsing instead.
+    let mut name_operand_option = |key: &str, operand_id: Option<u32>| {
+        if let Some(operand_id) = operand_id {
+            options.insert(
+                key.to_string(),
+                serde_json::Value::String(operand_export_name_with_overrides(
+                    &graph.operands[operand_id as usize],
+                    operand_id as usize,
+                    overrides,
+                )),
+            );
+        }
+    };
+    match operation {
+        Operation::BatchNormalization {
+            options: Some(o), ..
+        } => {
+            name_operand_option("scale", o.scale);
+            name_operand_option("bias", o.bias);
+        }
+        Operation::Conv2d {
+            options: Some(o), ..
+        } => {
+            name_operand_option("bias", o.bias);
+        }
+        Operation::ConvTranspose2d {
+            options: Some(o), ..
+        } => {
+            name_operand_option("bias", o.bias);
+        }
+        Operation::Gemm {
+            options: Some(o), ..
+        } => name_operand_option("c", o.c),
+        Operation::Gru {
+            options: Some(o), ..
+        } => {
+            name_operand_option("bias", o.bias);
+            name_operand_option("recurrentBias", o.recurrent_bias);
+            name_operand_option("initialHiddenState", o.initial_hidden_state);
+        }
+        Operation::GruCell {
+            options: Some(o), ..
+        } => {
+            name_operand_option("bias", o.bias);
+            name_operand_option("recurrentBias", o.recurrent_bias);
+        }
+        Operation::InstanceNormalization {
+            options: Some(o), ..
+        } => {
+            name_operand_option("scale", o.scale);
+            name_operand_option("bias", o.bias);
+        }
+        Operation::LayerNormalization {
+            options: Some(o), ..
+        } => {
+            name_operand_option("scale", o.scale);
+            name_operand_option("bias", o.bias);
+        }
+        Operation::Lstm {
+            options: Some(o), ..
+        } => {
+            name_operand_option("bias", o.bias);
+            name_operand_option("recurrentBias", o.recurrent_bias);
+            name_operand_option("peepholeWeight", o.peephole_weight);
+            name_operand_option("initialHiddenState", o.initial_hidden_state);
+            name_operand_option("initialCellState", o.initial_cell_state);
+        }
+        Operation::LstmCell {
+            options: Some(o), ..
+        } => {
+            name_operand_option("bias", o.bias);
+            name_operand_option("recurrentBias", o.recurrent_bias);
+            name_operand_option("peepholeWeight", o.peephole_weight);
+        }
+        _ => {}
+    }
 
     Ok(Node {
         id,
@@ -481,7 +559,33 @@ pub fn from_graph_json(graph_json: &GraphJson) -> Result<GraphInfo, GraphError> 
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let attrs_value = serde_json::Value::Object(node.options.clone());
+        let mut resolved_options = node.options.clone();
+        for key in [
+            "scale",
+            "bias",
+            "c",
+            "recurrentBias",
+            "peepholeWeight",
+            "initialHiddenState",
+            "initialCellState",
+        ] {
+            let Some(serde_json::Value::String(name)) = resolved_options.get(key) else {
+                continue;
+            };
+            let operand_id =
+                operand_map
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| GraphError::ConversionFailed {
+                        format: "webnn-graph-json".to_string(),
+                        reason: format!(
+                            "operand-valued option {key} references unknown operand {name}"
+                        ),
+                    })?;
+            resolved_options.insert(key.to_string(), serde_json::Value::from(operand_id));
+        }
+
+        let attrs_value = serde_json::Value::Object(resolved_options);
         let operator = Operation::from_json_attributes(
             &node.op,
             &input_operands,
@@ -603,6 +707,20 @@ fn infer_output_shapes(graph: &mut GraphInfo) -> Result<(), GraphError> {
         Some(out)
     }
 
+    // Operation outputs are created with an empty placeholder shape while parsing. Keep
+    // their inference state separate because an empty shape is also the valid shape of a
+    // scalar. Operands declared outside the operation list (inputs and constants) already
+    // have authoritative descriptors, including declared scalar shapes.
+    let produced_operands: HashSet<u32> = graph
+        .operations
+        .iter()
+        .flat_map(Operation::output_operands)
+        .copied()
+        .collect();
+    let mut known_shapes: HashSet<u32> = (0..graph.operands.len() as u32)
+        .filter(|id| !produced_operands.contains(id))
+        .collect();
+
     // Run multiple passes until no more shapes can be inferred
     debug_print!(
         "[SHAPE INFERENCE] Starting shape inference with {} operations",
@@ -635,12 +753,22 @@ fn infer_output_shapes(graph: &mut GraphInfo) -> Result<(), GraphError> {
                 }
             }
 
-            // Skip if output already has a shape
-            if let Some(output_id) = op.output_operand()
-                && !graph.operands[output_id as usize]
-                    .descriptor
-                    .shape
-                    .is_empty()
+            // Skip only after every output has an inferred shape. Multi-output operations such
+            // as split may have their first result inferred while a later result is still needed.
+            // Do not use `shape.is_empty()` here: a successfully inferred scalar also has an
+            // empty shape.
+            let output_ids = op.output_operands().to_vec();
+            if !output_ids.is_empty() && output_ids.iter().all(|id| known_shapes.contains(id)) {
+                continue;
+            }
+
+            // An empty shape on an input is meaningful only after that input shape has
+            // been inferred. Wait for earlier operations instead of treating an unresolved
+            // intermediate as a scalar.
+            if !op
+                .input_operands()
+                .iter()
+                .all(|id| known_shapes.contains(id))
             {
                 continue;
             }
@@ -656,6 +784,109 @@ fn infer_output_shapes(graph: &mut GraphInfo) -> Result<(), GraphError> {
                 .iter()
                 .map(|&id| graph.operands[id as usize].descriptor.data_type)
                 .collect();
+
+            // Operations with independently shaped results need to update every output rather
+            // than flowing through `output_operand()`, which intentionally returns only the first.
+            let multi_output_shapes = match op {
+                Operation::Split {
+                    splits,
+                    split_equal_parts,
+                    options,
+                    ..
+                } => input_shapes.first().and_then(|input_shape| {
+                    let input_shape = input_shape
+                        .iter()
+                        .map(crate::graph::get_static_or_max_size)
+                        .collect::<Vec<_>>();
+                    let split_spec = split_equal_parts
+                        .map(SplitSpec::Count)
+                        .unwrap_or_else(|| SplitSpec::Sizes(splits.clone()));
+                    let axis = options.as_ref().map(|o| o.axis).unwrap_or(0);
+                    infer_split_shapes(&input_shape, &split_spec, axis)
+                        .ok()
+                        .filter(|shapes| shapes.len() == output_ids.len())
+                        .map(|shapes| {
+                            shapes
+                                .into_iter()
+                                .map(|shape| to_dimension_vector(&shape))
+                                .collect::<Vec<_>>()
+                        })
+                }),
+                Operation::Gru {
+                    steps,
+                    hidden_size,
+                    options,
+                    ..
+                } => input_shapes.first().and_then(|input_shape| {
+                    let batch = match input_shape.len() {
+                        2 => crate::graph::get_static_or_max_size(&input_shape[0]),
+                        3 => crate::graph::get_static_or_max_size(&input_shape[1]),
+                        _ => return None,
+                    };
+                    let num_directions = options
+                        .as_ref()
+                        .is_some_and(|o| o.direction == "both")
+                        .then_some(2)
+                        .unwrap_or(1);
+                    let mut shapes =
+                        vec![to_dimension_vector(&[num_directions, batch, *hidden_size])];
+                    if options.as_ref().is_some_and(|o| o.return_sequence) {
+                        shapes.push(to_dimension_vector(&[
+                            *steps,
+                            num_directions,
+                            batch,
+                            *hidden_size,
+                        ]));
+                    }
+                    (shapes.len() == output_ids.len()).then_some(shapes)
+                }),
+                Operation::Lstm {
+                    steps,
+                    hidden_size,
+                    options,
+                    ..
+                } => input_shapes.first().and_then(|input_shape| {
+                    let batch = match input_shape.len() {
+                        2 => crate::graph::get_static_or_max_size(&input_shape[0]),
+                        3 => crate::graph::get_static_or_max_size(&input_shape[1]),
+                        _ => return None,
+                    };
+                    let num_directions = options
+                        .as_ref()
+                        .is_some_and(|o| o.direction == "both")
+                        .then_some(2)
+                        .unwrap_or(1);
+                    let state_shape = to_dimension_vector(&[num_directions, batch, *hidden_size]);
+                    let mut shapes = vec![state_shape.clone(), state_shape];
+                    if options.as_ref().is_some_and(|o| o.return_sequence) {
+                        shapes.push(to_dimension_vector(&[
+                            *steps,
+                            num_directions,
+                            batch,
+                            *hidden_size,
+                        ]));
+                    }
+                    (shapes.len() == output_ids.len()).then_some(shapes)
+                }),
+                Operation::LstmCell {
+                    hidden_state,
+                    cell_state,
+                    ..
+                } => {
+                    let shapes = vec![
+                        graph.operands[*hidden_state as usize]
+                            .descriptor
+                            .shape
+                            .clone(),
+                        graph.operands[*cell_state as usize]
+                            .descriptor
+                            .shape
+                            .clone(),
+                    ];
+                    (shapes.len() == output_ids.len()).then_some(shapes)
+                }
+                _ => None,
+            };
 
             // Infer output shape based on operation type
             let output_shape = match op_type.as_str() {
@@ -742,6 +973,42 @@ fn infer_output_shapes(graph: &mut GraphInfo) -> Result<(), GraphError> {
                     }),
                     _ => None,
                 },
+
+                "squeeze" => {
+                    if let Some(input_shape) = input_shapes.first() {
+                        let axes = match &op {
+                            Operation::Squeeze { options, .. } => options
+                                .as_ref()
+                                .filter(|o| !o.axes.is_empty())
+                                .map(|o| o.axes.as_slice()),
+                            _ => None,
+                        };
+                        let input_u32: Vec<u32> = input_shape
+                            .iter()
+                            .map(crate::graph::get_static_or_max_size)
+                            .collect();
+                        infer_squeeze_shape(&input_u32, axes)
+                            .ok()
+                            .map(|shape| to_dimension_vector(&shape))
+                    } else {
+                        None
+                    }
+                }
+
+                "unsqueeze" => {
+                    if let Some(input_shape) = input_shapes.first() {
+                        let axes = match &op {
+                            Operation::Unsqueeze { options, .. } => options
+                                .as_ref()
+                                .map(|o| o.axes.as_slice())
+                                .unwrap_or(&[]),
+                            _ => &[],
+                        };
+                        infer_unsqueeze_shape_dimensions(input_shape, axes).ok()
+                    } else {
+                        None
+                    }
+                }
 
                 // Transpose
                 "transpose" => {
@@ -1067,16 +1334,23 @@ fn infer_output_shapes(graph: &mut GraphInfo) -> Result<(), GraphError> {
                 _ => None,
             };
 
-            // Update output operand shape if we inferred it
-            if let Some(shape) = output_shape
-                && let Some(output_id) = op.output_operand()
+            // Update output operand shapes if we inferred them.
+            if let Some(shapes) = multi_output_shapes {
+                for (&output_id, shape) in output_ids.iter().zip(shapes) {
+                    graph.operands[output_id as usize].descriptor.shape = shape;
+                    known_shapes.insert(output_id);
+                }
+                made_progress = true;
+            } else if let Some(shape) = output_shape
+                && let Some(&output_id) = output_ids.first()
             {
                 graph.operands[output_id as usize].descriptor.shape = shape;
+                known_shapes.insert(output_id);
                 made_progress = true;
             }
 
             // Propagate output data types where deterministically known
-            if let Some(output_id) = op.output_operand() {
+            if !output_ids.is_empty() {
                 let output_type = match op_type.as_str() {
                     "shape" => Some(DataType::Int64),
                     "constant" => match &op {
@@ -1109,6 +1383,7 @@ fn infer_output_shapes(graph: &mut GraphInfo) -> Result<(), GraphError> {
                     | "gatherelements"
                     | "gathernd"
                     | "concat"
+                    | "split"
                     | "slice"
                     | "reshape"
                     | "transpose"
@@ -1192,14 +1467,9 @@ fn infer_output_shapes(graph: &mut GraphInfo) -> Result<(), GraphError> {
                     _ => None,
                 };
                 if let Some(dtype) = output_type {
-                    graph.operands[output_id as usize].descriptor.data_type = dtype;
-                    // LSTM has multiple outputs (Y_h, Y_c, optional sequence); all match input type.
-                    if matches!(op_type.as_str(), "lstm" | "lstmcell" | "lstm_cell") {
-                        for &oid in op.output_operands() {
-                            if oid != output_id {
-                                graph.operands[oid as usize].descriptor.data_type = dtype;
-                            }
-                        }
+                    // WebNN multi-output operations produce results with one element type.
+                    for &oid in &output_ids {
+                        graph.operands[oid as usize].descriptor.data_type = dtype;
                     }
                 }
             }
@@ -1211,23 +1481,34 @@ fn infer_output_shapes(graph: &mut GraphInfo) -> Result<(), GraphError> {
         }
     }
 
-    // Summary: count operands with empty shapes
-    let empty_shape_count = graph
-        .operands
+    let required_operands: HashSet<u32> = graph
+        .operations
         .iter()
-        .filter(|op| op.descriptor.shape.is_empty())
-        .count();
+        .flat_map(Operation::input_operands)
+        .chain(graph.output_operands.iter().copied())
+        .collect();
+    let mut unresolved: Vec<u32> = required_operands
+        .difference(&known_shapes)
+        .copied()
+        .collect();
+    unresolved.sort_unstable();
     debug_print!(
-        "[SHAPE INFERENCE] Completed: {} operands still have empty shapes",
-        empty_shape_count
+        "[SHAPE INFERENCE] Completed: {} required operands still have unknown shapes",
+        unresolved.len()
     );
-    if empty_shape_count > 0 {
-        debug_print!("[SHAPE INFERENCE] WARNING: Some operands could not have shapes inferred!");
-        for (idx, op) in graph.operands.iter().enumerate() {
-            if op.descriptor.shape.is_empty() {
-                debug_print!("  operand_{}: name={:?}, kind={:?}", idx, op.name, op.kind);
-            }
-        }
+    if !unresolved.is_empty() {
+        let details = unresolved
+            .iter()
+            .map(|&id| {
+                let operand = &graph.operands[id as usize];
+                format!("operand_{id} ({:?}, {:?})", operand.name, operand.kind)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(GraphError::ConversionFailed {
+            format: "webnn-graph-json".to_string(),
+            reason: format!("could not infer shapes for required operands: {details}"),
+        });
     }
 
     Ok(())
