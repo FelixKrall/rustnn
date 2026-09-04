@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Once;
 
 use log::{info, warn};
@@ -195,6 +196,30 @@ pub fn run_onnx_with_inputs(
     run_onnx_with_inputs_impl(model_bytes, external_weights, inputs, None, None)
 }
 
+/// Run an ONNX model from disk with actual input tensors.
+///
+/// Unlike the in-memory entry point, loading from a path lets ONNX Runtime
+/// resolve standard external-data files relative to the model location.
+pub fn run_onnx_path_with_inputs(
+    model_path: impl AsRef<Path>,
+    inputs: Vec<OnnxInput>,
+) -> Result<Vec<OnnxOutputWithData>, GraphError> {
+    ensure_ort_initialized()?;
+    let session = Session::builder()
+        .map_err(|e| GraphError::OnnxRuntimeFailed {
+            reason: format!("session builder failed: {e}"),
+        })?
+        .with_optimization_level(GraphOptimizationLevel::Disable)
+        .map_err(|e| GraphError::OnnxRuntimeFailed {
+            reason: format!("set opt level failed: {e}"),
+        })?
+        .commit_from_file(model_path)
+        .map_err(|e| GraphError::OnnxRuntimeFailed {
+            reason: format!("load model failed: {e}"),
+        })?;
+    run_onnx_session_with_inputs(session, inputs, None, None)
+}
+
 /// Same as [`run_onnx_with_inputs`], plus optional WebNN operand descriptor validation.
 ///
 /// For each map that is `Some`, validates actual tensor shapes against that map (inputs before the
@@ -244,15 +269,24 @@ fn run_onnx_with_inputs_impl(
                 reason: format!("set external initializer failed: {e}"),
             })?;
     }
-    let mut session =
+    let session =
         builder
             .commit_from_memory(model_bytes)
             .map_err(|e| GraphError::OnnxRuntimeFailed {
                 reason: format!("load model failed: {e}"),
             })?;
 
-    // Extract output names for later use
+    run_onnx_session_with_inputs(session, inputs, input_descriptors, output_descriptors)
+}
+
+fn run_onnx_session_with_inputs(
+    mut session: Session,
+    inputs: Vec<OnnxInput>,
+    input_descriptors: Option<&HashMap<String, OperandDescriptor>>,
+    output_descriptors: Option<&HashMap<String, OperandDescriptor>>,
+) -> Result<Vec<OnnxOutputWithData>, GraphError> {
     let output_names: Vec<String> = session
+        // Extract output names for later use.
         .outputs()
         .iter()
         .map(|o| o.name().to_string())
