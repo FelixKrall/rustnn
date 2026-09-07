@@ -170,6 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "src/converters/trtx_gru.rs",
         "src/converters/trtx_lstm.rs",
         "src/converters/trtx_rnn.rs",
+        "src/backends/trtx.rs",
     ]);
     Ok(())
 }

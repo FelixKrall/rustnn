@@ -279,6 +279,10 @@ impl<'context> TrtxContext<'context> {
         // (mostly scalars)
         config.set_flag(trtx::trtx_sys::BuilderFlag::kREFIT_INDIVIDUAL);
         config.set_flag(trtx::trtx_sys::BuilderFlag::kSTRIP_PLAN);
+        // Keep float32 math at full precision, matching the GraphConverter path:
+        // TF32 matmul/conv rounds mantissas to 10 bits and drifts many ULP from
+        // CPU references (WebNN conformance compares against strict IEEE fp32).
+        config.clear_flag(trtx::trtx_sys::BuilderFlag::kTF32);
         if std::env::var(TRTX_JSON_DUMP_PATH_ENV_VAR).is_ok() {
             config.set_profiling_verbosity(trtx::ProfilingVerbosity::kDETAILED);
         }
@@ -419,6 +423,12 @@ impl<'context, 'builder> MLBackendBuilder<'context, 'builder> for TrtxBuilder<'c
 
         let non_refittable_constants =
             crate::converters::TrtxConverter::gather_baked_constant_operand_ids(&graph);
+        // Dead constants (no consumer) are eliminated by the TensorRT builder and
+        // have no refit prototype; they are neither marked refittable nor refitted.
+        // They do not take part in the caching decision: their values cannot
+        // influence the engine's outputs.
+        let unused_constants =
+            crate::converters::TrtxConverter::unused_constant_operand_ids(&graph);
 
         // no caching for non_refittable_constants for now, non_refittable_constants will end up in
         // the engine and potentially grow our cache to much. We should only consider including
@@ -456,7 +466,9 @@ impl<'context, 'builder> MLBackendBuilder<'context, 'builder> for TrtxBuilder<'c
             let non_refittable_constants =
                 crate::converters::TrtxConverter::gather_baked_constant_operand_ids(&graph);
             for constant_id in graph.constant_operand_ids_to_handles.keys() {
-                if !non_refittable_constants.contains(constant_id) {
+                if !non_refittable_constants.contains(constant_id)
+                    && !unused_constants.contains(constant_id)
+                {
                     network.mark_weights_refittable(&format!("{constant_id}"))?;
                 }
             }
@@ -512,7 +524,7 @@ impl<'context, 'builder> MLBackendBuilder<'context, 'builder> for TrtxBuilder<'c
         let mut refitter = Refitter::new(&engine, &LOGGER)?;
 
         for (id, constant) in graph.constant_operand_ids_to_handles.iter() {
-            if non_refittable_constants.contains(id) {
+            if non_refittable_constants.contains(id) || unused_constants.contains(id) {
                 continue;
             }
             let operand = graph.operands.get(*id as usize);
@@ -549,8 +561,29 @@ impl<'context, 'builder> MLBackendBuilder<'context, 'builder> for TrtxBuilder<'c
                         },
                         // TODO: register and upload during build, refit with device location
                         trtx::trtx_sys::nvinfer1::TensorLocation::kHOST,
-                    )?
-                };
+                    )
+                }
+                .map_err(|e| {
+                    // Name the operand: TensorRT only reports the weight name, and
+                    // "cannot be refitted" means the builder folded the constant.
+                    let consumers: Vec<String> = graph
+                        .operations
+                        .iter()
+                        .filter(|op| op.input_operands().contains(id))
+                        .map(|op| op.op_type().to_string())
+                        .collect();
+                    crate::error::Error::GraphBuildError {
+                        source: crate::GraphError::ConversionFailed {
+                            format: "trtx".to_string(),
+                            reason: format!(
+                                "refit of constant operand {id} ({:?} {:?}, consumed by {consumers:?}) failed: {e}",
+                                operand.descriptor.data_type,
+                                operand.descriptor.static_or_max_shape()
+                            ),
+                        }
+                        .into(),
+                    }
+                })?;
             } else {
                 return Err(GraphBuilderError::InconsistentGraphInfo {
                     message: format!(
