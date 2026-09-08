@@ -244,10 +244,13 @@ impl TrtxConverter {
     /// Their values cannot influence outputs, so skipping them is always sound,
     /// including for cached engines.
     pub fn unused_constant_operand_ids(graph: &GraphInfo) -> HashSet<u32> {
+        // Option operands (gemm.c, normalization scale/bias, RNN biases and
+        // states) count as consumers: a constant wrongly classified as dead is
+        // baked into the engine and then served stale to every cached build.
         let consumed: HashSet<u32> = graph
             .operations
             .iter()
-            .flat_map(|op| op.input_operands().to_vec())
+            .flat_map(|op| op.all_input_operands())
             .collect();
         graph
             .operands
@@ -531,7 +534,7 @@ impl TrtxConverter {
 
     /// Cast BOOL tensor to Uint8 (false → 0, true → 1) per WebNN logical/comparison output type.
     ///
-    /// TensorRT 3.16+ restricts internal `kUINT8` to network I/O and DQ outputs; comparison only
+    /// TensorRT restricts internal `kUINT8` to network I/O and DQ outputs; comparison only
     /// produces 0/1, so we emit `kINT8` (WebNN-compatible for this value range).
     fn cast_bool_to_uint8<'a>(
         network: &mut trtx::NetworkDefinition<'a>,
@@ -572,7 +575,7 @@ impl TrtxConverter {
 
     /// Promote uint8/int8 mask operands to float32 before TRT shuffle/resize/identity.
     ///
-    /// TensorRT 3.16+ allows UINT8 only at network I/O, not on internal broadcast ops.
+    /// TensorRT allows UINT8 only at network I/O, not on internal broadcast ops.
     /// Returns a promoted tensor when needed; callers use `promoted.as_ref().unwrap_or(input)`.
     fn promote_mask_for_trt_broadcast<'a>(
         graph: &GraphInfo,
@@ -685,8 +688,8 @@ impl TrtxConverter {
 
     /// Materialize a computed uint8 value held in a float/int32 tensor. Graph
     /// outputs become kUINT8 (legal at network I/O and matching the binding's
-    /// byte layout); internal tensors stay kINT32 because TensorRT (>= 3.16)
-    /// rejects a Cast-produced kUINT8 tensor anywhere else. Consumers read the
+    /// byte layout); internal tensors stay kINT32 because TensorRT rejects a
+    /// Cast-produced kUINT8 tensor anywhere else. Consumers read the
     /// WebNN dtype and cast from whatever storage they find (`add_cast_op`, the
     /// manual dequantize path, `cast_uint8_to_int32`).
     fn store_uint8_result<'a>(
@@ -1852,7 +1855,7 @@ impl TrtxConverter {
     /// Add logical operation: broadcast inputs, cast to BOOL, elementwise kAND/kOR/kXOR, Uint8 output.
     ///
     /// TensorRT elementwise `kAND` / `kOR` / `kXOR` require BOOL inputs. [`ensure_broadcast_compatible`]
-    /// uses shuffle/resize, which reject internal UINT8/INT8 (TRT 3.16+), so mask operands are
+    /// uses shuffle/resize, which reject internal UINT8/INT8, so mask operands are
     /// promoted to Float32 before broadcast, then cast to BOOL.
     fn add_logical_binary_op<'a>(
         graph: &GraphInfo,
@@ -3127,7 +3130,7 @@ impl TrtxConverter {
             return Ok(());
         }
 
-        // TensorRT (>= 3.16) rejects internal kUINT8 tensors unless a Constant or
+        // TensorRT rejects internal kUINT8 tensors unless a Constant or
         // Dequantize layer produces them, and int8 tensors may only feed DQ. An
         // integer tensor narrowed to int8/uint8/int4/uint4 solely to be dequantized
         // (packed-weight unpacking: GatherBlockQuantized nibbles, MatMulNBits) or to
@@ -3181,7 +3184,7 @@ impl TrtxConverter {
         // Non-int8/uint8 or scalar promoted: direct cast.
         let mut trt_dtype = Self::webnn_to_trt_dtype(target_dtype)?;
         // Internal uint8 tensors follow the converter's mask convention and are
-        // stored as kINT8 (see `cast_bool_to_uint8`): TensorRT (>= 3.16) rejects a
+        // stored as kINT8 (see `cast_bool_to_uint8`): TensorRT rejects a
         // Cast-produced kUINT8 tensor that is not network I/O, and Shuffle accepts
         // Int8 but not UInt8. Consumers read the WebNN dtype and reinterpret.
         // Graph outputs keep kUINT8 so the binding's byte layout is exact.
@@ -11042,7 +11045,7 @@ impl TrtxConverter {
                 .all(|wi| pre_padding[wi] == 0 && post_padding[wi] == 0)
         };
 
-        // `IPaddingLayer` / 4D shuffle path rejects UINT8, INT32, INT64 (TRT 3.16+).
+        // `IPaddingLayer` / 4D shuffle path rejects UINT8, INT32, INT64.
         let input_trt_dtype = input.get_type(&*network);
         let ipadding_dtype_ok = Self::trtx_ipadding_layer_supports_dtype(input_trt_dtype);
 
@@ -11057,7 +11060,7 @@ impl TrtxConverter {
             let in_id = operation.input_operands()[0];
             let out_id = operation.output_operands_slice()[0];
 
-            // UINT8 internal concat tensors do not expose dimensions (TRT 3.16+); pad via INT32.
+            // UINT8 internal concat tensors do not expose dimensions; pad via INT32.
             let uint8_i32_holder;
             let (start_key, pad_via_int32) = if input_trt_dtype == TrtDataType::kUINT8 {
                 let i32_in = Self::cast_uint8_to_int32(network, input)?;
@@ -15273,6 +15276,51 @@ mod tests {
         let m = TrtxConverter::engine_io_binding_names(&graph);
         assert_eq!(m.get(&0).map(String::as_str), Some("lhs"));
         assert_eq!(m.get(&2).map(String::as_str), Some("sum"));
+    }
+
+    #[test]
+    fn test_unused_constants_count_option_operands_as_consumers() {
+        use crate::graph::to_dimension_vector;
+        use crate::graph::{Operand, OperandDescriptor, OperandKind};
+        use crate::operator_options::MLGemmOptions;
+        use crate::operators::Operation;
+        let desc = OperandDescriptor {
+            data_type: DataType::Float32,
+            shape: to_dimension_vector(&[2, 2]),
+            pending_permutation: vec![],
+        };
+        let operand = |kind: OperandKind| Operand {
+            kind,
+            descriptor: desc.clone(),
+            name: None,
+        };
+        let graph = GraphInfo {
+            operands: vec![
+                operand(OperandKind::Input),
+                operand(OperandKind::Constant),
+                operand(OperandKind::Constant),
+                operand(OperandKind::Output),
+                operand(OperandKind::Constant),
+            ],
+            input_operands: vec![0],
+            output_operands: vec![3],
+            operations: vec![Operation::Gemm {
+                a: 0,
+                b: 1,
+                options: Some(MLGemmOptions {
+                    c: Some(2),
+                    ..Default::default()
+                }),
+                outputs: vec![3],
+            }],
+            constant_operand_ids_to_handles: Default::default(),
+            id_to_constant_tensor_operand_map: Default::default(),
+            quantized: false,
+        };
+        let unused = TrtxConverter::unused_constant_operand_ids(&graph);
+        assert!(!unused.contains(&1), "positional constant b is consumed");
+        assert!(!unused.contains(&2), "option constant c is consumed");
+        assert!(unused.contains(&4), "dangling constant is dead");
     }
 
     #[test]

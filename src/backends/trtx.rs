@@ -583,7 +583,7 @@ impl<'context, 'builder> MLBackendBuilder<'context, 'builder> for TrtxBuilder<'c
                     let consumers: Vec<String> = graph
                         .operations
                         .iter()
-                        .filter(|op| op.input_operands().contains(id))
+                        .filter(|op| op.all_input_operands().contains(id))
                         .map(|op| op.op_type().to_string())
                         .collect();
                     TrtxError::ConstantRefitFailed {
