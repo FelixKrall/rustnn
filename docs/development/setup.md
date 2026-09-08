@@ -3,9 +3,27 @@
 ## Prerequisites
 
 - **Rust**: 1.70+ (install from [rustup.rs](https://rustup.rs/))
+- **Protocol Buffers compiler**: `protoc` (`protobuf-compiler` on Debian/Ubuntu,
+  `protobuf` with Homebrew)
 - **Python**: 3.11+ with pip
 - **Maturin**: `pip install maturin`
 - **Optional**: Graphviz for visualization (`brew install graphviz` on macOS)
+
+### Optional feature prerequisites
+
+The default build needs no native runtime beyond the prerequisites above.
+
+| Cargo feature | Additional requirements |
+| --- | --- |
+| `onnx-runtime` | ONNX Runtime 1.27+; `make onnxruntime-download` installs the pinned version and the related Make targets configure `ORT_DYLIB_PATH`. |
+| `coreml-runtime` | macOS and Xcode Command Line Tools; CoreML is supplied by macOS. Some in-memory execution paths require macOS 15+. |
+| `trtx-runtime`, `trtx-enterprise` | A compatible NVIDIA GPU and driver, CUDA 13.0, and a loadable TensorRT-RTX runtime. See the TensorRT integration guides. |
+| `litert-runtime` | `flatc` on `PATH` plus the native LiteRT library provisioned by `litert-sys`; WPT runs also configure its library search path. |
+| `cann-runtime` | An OHOS/Ascend HiAI environment and `libcann_shim.so` (or `CANN_SHIM_PATH`); dispatch is not implemented yet. |
+| `webnn-runtime` with `webnn-wpt-tests` | The `wasm32-unknown-unknown` target; browser tests additionally need `wasm-pack`, Node.js, Chrome/Chromium, `curl`, and `unzip`. |
+
+The mock backend features and `dynamic-inputs`, `native-examples`, `pollster`,
+and `zstd-cache-compression` do not add external runtime prerequisites.
 
 ## Building from Source
 
