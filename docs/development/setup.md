@@ -16,6 +16,22 @@ Windows: install the Visual Studio C++ build tools and run `git config --system 
 before cloning. Backend libraries (ONNX Runtime, TensorRT-RTX, LiteRT) are described in
 [Backends](../user-guide/backends.md).
 
+### Optional feature prerequisites
+
+The default build needs no native runtime beyond the prerequisites above.
+
+| Cargo feature | Additional requirements |
+|---|---|
+| `onnx-runtime` | The pinned ONNX Runtime; `make onnxruntime-download` installs it and the related Make targets configure `ORT_DYLIB_PATH` |
+| `coreml-runtime` | macOS and Xcode Command Line Tools; CoreML is supplied by macOS. Some in-memory execution paths require macOS 15+ |
+| `trtx-runtime`, `trtx-enterprise` | A compatible NVIDIA GPU and driver, CUDA 13.0, and a loadable TensorRT-RTX runtime |
+| `litert-runtime` | `flatc` on `PATH` plus the native LiteRT library provisioned by `litert-sys`; WPT runs also configure its library search path |
+| `cann-runtime` | An OHOS/Ascend HiAI environment and `libcann_shim.so` (or `CANN_SHIM_PATH`) |
+| `webnn-runtime` with `webnn-wpt-tests` | The `wasm32-unknown-unknown` target; browser tests additionally need `wasm-pack`, Node.js, Chrome/Chromium, `curl`, and `unzip` |
+
+The mock backend features and `dynamic-inputs`, `native-examples`, `pollster`, and
+`zstd-cache-compression` do not add external runtime prerequisites.
+
 ## Build and test
 
 Use the Makefile targets; they set feature flags and environment variables consistently.
