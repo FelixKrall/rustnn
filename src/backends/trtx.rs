@@ -91,6 +91,22 @@ pub enum TrtxError {
         "Engine cache miss: cache_key={cache_key:?}. Failed engine build because TrtxOptions::fail_on_cache_miss options was enabled"
     )]
     TrtxEngineCacheMiss { cache_key: Option<String> },
+    /// TensorRT rejected the refit of a constant operand. TensorRT itself only
+    /// reports the weight name; "cannot be refitted" means the builder folded
+    /// the constant into its consumers, which the converter must then mark as
+    /// non-refittable.
+    #[error(
+        "Failed to refit constant operand {operand_id} ({:?} {:?}, consumed by {consumers:?}): {source}",
+        .operand.descriptor.data_type,
+        .operand.descriptor.static_or_max_shape()
+    )]
+    ConstantRefitFailed {
+        operand_id: u32,
+        operand: crate::Operand,
+        consumers: Vec<String>,
+        #[source]
+        source: trtx::Error,
+    },
 }
 pub type TrtxResult<T> = std::result::Result<T, TrtxError>;
 
@@ -563,25 +579,18 @@ impl<'context, 'builder> MLBackendBuilder<'context, 'builder> for TrtxBuilder<'c
                         trtx::trtx_sys::nvinfer1::TensorLocation::kHOST,
                     )
                 }
-                .map_err(|e| {
-                    // Name the operand: TensorRT only reports the weight name, and
-                    // "cannot be refitted" means the builder folded the constant.
+                .map_err(|source| {
                     let consumers: Vec<String> = graph
                         .operations
                         .iter()
                         .filter(|op| op.input_operands().contains(id))
                         .map(|op| op.op_type().to_string())
                         .collect();
-                    crate::error::Error::GraphBuildError {
-                        source: crate::GraphError::ConversionFailed {
-                            format: "trtx".to_string(),
-                            reason: format!(
-                                "refit of constant operand {id} ({:?} {:?}, consumed by {consumers:?}) failed: {e}",
-                                operand.descriptor.data_type,
-                                operand.descriptor.static_or_max_shape()
-                            ),
-                        }
-                        .into(),
+                    TrtxError::ConstantRefitFailed {
+                        operand_id: *id,
+                        operand: (*operand).clone(),
+                        consumers,
+                        source,
                     }
                 })?;
             } else {
