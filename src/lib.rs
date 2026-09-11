@@ -5,6 +5,7 @@ pub mod debug;
 pub mod error;
 pub mod executors;
 pub mod graph;
+mod graph_recorder;
 pub mod graphviz;
 pub mod loader;
 pub mod mlcontext;
