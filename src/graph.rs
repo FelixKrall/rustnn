@@ -245,8 +245,7 @@ pub fn pack_uint4_from_i32(values: &[i32]) -> Vec<u8> {
 pub struct OperandDescriptor {
     /// Element type.
     pub data_type: DataType,
-    /// Dimensions, outermost first; empty for a scalar.
-    #[serde(default)]
+    /// Known dimensions, outermost first. An empty vector is a rank-0 scalar, never an unknown shape.
     pub shape: Vec<Dimension>,
     /// Layout permutation a converter still has to apply (internal bookkeeping, normally empty).
     #[serde(default)]
@@ -640,6 +639,16 @@ mod tests {
             pending_permutation: vec![],
         };
         assert_eq!(desc.byte_length(), Some(64));
+    }
+
+    #[test]
+    fn operand_descriptor_requires_shape_but_accepts_explicit_scalar() {
+        let scalar: OperandDescriptor =
+            serde_json::from_str(r#"{"data_type":"float32","shape":[]}"#).unwrap();
+        assert!(scalar.shape.is_empty());
+
+        let missing = serde_json::from_str::<OperandDescriptor>(r#"{"data_type":"float32"}"#);
+        assert!(missing.is_err());
     }
 
     #[test]
