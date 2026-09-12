@@ -553,7 +553,7 @@ pub fn from_graph_json(graph_json: &GraphJson) -> Result<GraphInfo, GraphError> 
         )
         .ok_or_else(|| {
             conversion_error(format!(
-                "node '{}' has unknown operation '{}' or an invalid operand count",
+                "node '{}' has unknown operation '{}', an invalid operand count, or missing required attributes",
                 node.id, node.op
             ))
         })?;
@@ -676,6 +676,109 @@ mod tests {
             constant_operand_ids_to_handles: HashMap::new(),
             id_to_constant_tensor_operand_map: HashMap::new(),
             quantized: true,
+        }
+    }
+
+    #[test]
+    fn scalar_shape_arguments_roundtrip_and_remain_explicit() {
+        for op_type in ["reshape", "expand", "tile"] {
+            let operation = match op_type {
+                "reshape" => Operation::Reshape {
+                    input: 0,
+                    new_shape: vec![],
+                    options: None,
+                    outputs: vec![1],
+                },
+                "expand" => Operation::Expand {
+                    input: 0,
+                    new_shape: vec![],
+                    options: None,
+                    outputs: vec![1],
+                },
+                "tile" => Operation::Tile {
+                    input: 0,
+                    repetitions: vec![],
+                    options: None,
+                    outputs: vec![1],
+                },
+                _ => unreachable!(),
+            };
+            let descriptor = OperandDescriptor {
+                data_type: DataType::Float32,
+                shape: vec![],
+                pending_permutation: vec![],
+            };
+            let graph = GraphInfo {
+                operands: vec![
+                    Operand {
+                        kind: OperandKind::Input,
+                        descriptor: descriptor.clone(),
+                        name: Some("x".to_string()),
+                    },
+                    Operand {
+                        kind: OperandKind::Output,
+                        descriptor,
+                        name: Some("y".to_string()),
+                    },
+                ],
+                input_operands: vec![0],
+                output_operands: vec![1],
+                operations: vec![operation],
+                constant_operand_ids_to_handles: HashMap::new(),
+                id_to_constant_tensor_operand_map: HashMap::new(),
+                quantized: false,
+            };
+
+            let json = to_graph_json(&graph, false).expect("to_graph_json");
+            let argument = if op_type == "tile" {
+                "repetitions"
+            } else {
+                "newShape"
+            };
+            assert_eq!(
+                json.nodes[0].options.get(argument),
+                Some(&serde_json::json!([])),
+                "{op_type} must serialize a scalar-rank argument explicitly"
+            );
+            let loaded = from_graph_json(&json).expect("from_graph_json");
+            assert!(
+                loaded.operands[loaded.output_operands[0] as usize]
+                    .descriptor
+                    .shape
+                    .is_empty()
+            );
+
+            let mut missing = json;
+            missing.nodes[0].options.remove(argument);
+            let error = from_graph_json(&missing).unwrap_err();
+            assert!(
+                error.to_string().contains("missing required attributes"),
+                "unexpected {op_type} error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn shape_vector_arguments_distinguish_missing_from_explicit_empty() {
+        for (op_type, attributes) in [
+            ("reshape", serde_json::json!({ "newShape": [] })),
+            ("expand", serde_json::json!({ "newShape": [] })),
+            ("tile", serde_json::json!({ "repetitions": [] })),
+            (
+                "pad",
+                serde_json::json!({ "beginningPadding": [], "endingPadding": [] }),
+            ),
+            ("slice", serde_json::json!({ "starts": [], "sizes": [] })),
+        ] {
+            assert!(
+                Operation::from_json_attributes(op_type, &[0], &[1], &attributes).is_some(),
+                "{op_type} must retain an explicitly empty vector"
+            );
+            assert!(
+                Operation::from_json_attributes(op_type, &[0], &[1], &serde_json::json!({}))
+                    .is_none(),
+                "{op_type} must reject a missing required vector"
+            );
         }
     }
 

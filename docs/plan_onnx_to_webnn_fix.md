@@ -207,7 +207,10 @@ print("constant empty:", len([n for n in empty if "Constant" in n]))
 PY
 ```
 
-Fix:
+Historical fix (superseded by the shared `GraphRecorder` inference path):
+
+> Current invariant: every `OperandDescriptor` in a completed `GraphInfo` has a known shape, and `[]` means only a rank-0 scalar. The empty-shape counting helpers below were diagnostic heuristics for the former loader and must not be used to identify unresolved shapes. Failed inference is now represented before insertion and returned as an error.
+
 - `webnn_json::infer_output_shapes` now treats concat of scalar inputs with `axis=0` as a shape vector with length `N` (number of inputs).
 - Added loader helpers to separate empty shapes for constants vs non-constants:
   - `MLGraph.count_unknown_shapes()` counts empty shapes for non-constants (heuristic for unknown shapes).
@@ -312,9 +315,8 @@ Results:
 - ONNX (original) vs WebNN: average cosine 1.0.
 
 ### Next debugging steps (for restart)
-1. Use `MLGraph.count_unknown_shapes()` and `MLGraph.count_scalar_constants()` to separate likely unknown shapes from scalar constants.
-2. If we need more precision, add logic to tag known scalar outputs from ops like reduce/shape.
-3. Re-run sanity + comparison commands above if any loader/shape-inference changes are made.
+1. Treat every empty descriptor shape as a known scalar; inference failures must surface before an operand is inserted.
+2. Re-run sanity and comparison commands above if any loader or shape-inference changes are made.
 
 ## Environment notes
 - Use `DYLD_LIBRARY_PATH=target/onnxruntime/onnxruntime-osx-arm64-1.23.2/lib` when running Python.

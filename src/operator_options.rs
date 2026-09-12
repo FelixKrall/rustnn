@@ -74,18 +74,18 @@ pub struct OperationExtras {
     pub batch_dimensions: Option<u32>,
     pub steps: Option<u32>,
     pub hidden_size: Option<u32>,
-    pub beginning_padding: Vec<u32>,
-    pub ending_padding: Vec<u32>,
-    pub starts: Vec<u32>,
-    pub sizes: Vec<MLDimension>,
+    pub beginning_padding: Option<Vec<u32>>,
+    pub ending_padding: Option<Vec<u32>>,
+    pub starts: Option<Vec<u32>>,
+    pub sizes: Option<Vec<MLDimension>>,
     pub splits: Vec<u32>,
     pub split_equal_parts: Option<u32>,
     /// `expand()` method argument `newShape` (not part of MLOperatorOptions).
-    pub expand_new_shape: Vec<MLDimension>,
+    pub expand_new_shape: Option<Vec<MLDimension>>,
     /// `tile()` method argument `repetitions` (not part of MLOperatorOptions).
-    pub repetitions: Vec<u32>,
+    pub repetitions: Option<Vec<u32>>,
     /// `reshape()` method argument `newShape` (not part of MLOperatorOptions).
-    pub reshape_new_shape: Vec<MLDimension>,
+    pub reshape_new_shape: Option<Vec<MLDimension>>,
 }
 
 impl OperationExtras {
@@ -105,10 +105,9 @@ impl OperationExtras {
         fn remove_u32_vec(
             obj: &mut serde_json::Map<String, serde_json::Value>,
             key: &str,
-        ) -> Vec<u32> {
+        ) -> Option<Vec<u32>> {
             obj.remove(key)
                 .and_then(|x| serde_json::from_value::<Vec<u32>>(x).ok())
-                .unwrap_or_default()
         }
         match op {
             "argMin" | "argMax" => {
@@ -129,7 +128,7 @@ impl OperationExtras {
                 if let Some(s) = obj.remove("newShape").or_else(|| obj.remove("new_shape"))
                     && let Ok(parsed) = serde_json::from_value::<Vec<MLDimension>>(s)
                 {
-                    out.expand_new_shape = parsed;
+                    out.expand_new_shape = Some(parsed);
                 }
             }
             "cumulativeSum" => {
@@ -171,14 +170,10 @@ impl OperationExtras {
                 let _ = obj.remove("has_bias");
             }
             "pad" => {
-                out.beginning_padding = remove_u32_vec(obj, "beginningPadding");
-                if out.beginning_padding.is_empty() {
-                    out.beginning_padding = remove_u32_vec(obj, "beginning_padding");
-                }
-                out.ending_padding = remove_u32_vec(obj, "endingPadding");
-                if out.ending_padding.is_empty() {
-                    out.ending_padding = remove_u32_vec(obj, "ending_padding");
-                }
+                out.beginning_padding = remove_u32_vec(obj, "beginningPadding")
+                    .or_else(|| remove_u32_vec(obj, "beginning_padding"));
+                out.ending_padding = remove_u32_vec(obj, "endingPadding")
+                    .or_else(|| remove_u32_vec(obj, "ending_padding"));
             }
             "softmax" => {
                 out.axis = remove_u32(obj, "axis");
@@ -188,7 +183,7 @@ impl OperationExtras {
                 if let Some(s) = obj.remove("sizes")
                     && let Ok(parsed) = serde_json::from_value::<Vec<MLDimension>>(s)
                 {
-                    out.sizes = parsed;
+                    out.sizes = Some(parsed);
                 }
             }
             "split" => {
@@ -213,7 +208,7 @@ impl OperationExtras {
                 if let Some(s) = obj.remove("newShape").or_else(|| obj.remove("new_shape"))
                     && let Ok(parsed) = serde_json::from_value::<Vec<MLDimension>>(s)
                 {
-                    out.reshape_new_shape = parsed;
+                    out.reshape_new_shape = Some(parsed);
                 }
             }
             _ => {}
@@ -423,7 +418,7 @@ pub struct MLConstantOptions {
     pub data: Option<String>, // base64
     pub data_type: String,
     #[serde(default)]
-    pub shape: Vec<u32>,
+    pub shape: Option<Vec<u32>>,
 }
 
 /// MLCumulativeSumOptions. cumulativeSum (axis is a builder method parameter).

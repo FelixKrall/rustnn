@@ -402,20 +402,6 @@ impl<'a> GraphValidator<'a> {
         let input_shape = input_desc.static_or_max_shape();
         let scale_shape = scale_desc.static_or_max_shape();
 
-        // TODO: not ideal that scalar [] and unknown are represented in the same way
-        // Intermediate operation outputs may still carry unresolved shape metadata ([]).
-        // Treat those as unknown to avoid rejecting valid subgraphs during early validation.
-        let input_shape_known = !(input_shape_dims.is_empty()
-            && matches!(
-                input_operand.kind,
-                OperandKind::Output | OperandKind::Intermediate
-            ));
-        let output_shape_known = !(output_desc.shape.is_empty()
-            && matches!(
-                output_operand.kind,
-                OperandKind::Output | OperandKind::Intermediate
-            ));
-
         if scale_shape_dims.is_empty() {
             if !zero_point_shape_dims.is_empty() {
                 return Err(invalid(format!(
@@ -423,7 +409,7 @@ impl<'a> GraphValidator<'a> {
                     zero_point_shape_dims
                 )));
             }
-        } else if input_shape_known {
+        } else {
             if scale_shape_dims.len() != input_shape_dims.len() {
                 return Err(invalid(format!(
                     "scale rank {} must match input rank {}",
@@ -438,18 +424,11 @@ impl<'a> GraphValidator<'a> {
                 )));
             }
         }
-        if input_shape_known
-            && output_shape_known
-            && output_desc.static_or_max_shape() != *input_shape
-        {
+        if output_desc.static_or_max_shape() != input_shape {
             return Err(invalid(format!(
                 "output shape {:?} must match input shape {:?}",
                 output_desc.shape, input_shape_dims
             )));
-        }
-
-        if !input_shape_known {
-            return Ok(());
         }
 
         let mut non_one_dims = Vec::new();
@@ -727,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn quantize_unknown_intermediate_shape_validates() {
+    fn quantize_scalar_intermediate_is_not_treated_as_unknown() {
         let input_operand = Operand {
             kind: OperandKind::Input,
             descriptor: OperandDescriptor {
@@ -760,7 +739,7 @@ mod tests {
             name: None,
         };
 
-        // Intermediate output with unresolved shape metadata ([]).
+        // Empty shapes are known scalars, even on intermediate and output operands.
         let unresolved_intermediate = Operand {
             kind: OperandKind::Intermediate,
             descriptor: OperandDescriptor {
@@ -815,7 +794,27 @@ mod tests {
         };
 
         let validator = GraphValidator::new(&graph, ContextProperties::default());
-        validator.validate().unwrap();
+        let error = validator.validate().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("scale rank 4 must match input rank 0")
+        );
+    }
+
+    #[test]
+    fn quantize_scalar_shapes_validate() {
+        let graph = build_quantize_graph(
+            "quantizeLinear",
+            DataType::Float32,
+            DataType::Float32,
+            DataType::Uint8,
+            vec![],
+            vec![],
+        );
+        GraphValidator::new(&graph, ContextProperties::default())
+            .validate()
+            .unwrap();
     }
 
     #[test]

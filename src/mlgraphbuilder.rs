@@ -243,6 +243,16 @@ fn constant_shape(
     })?;
     let shape = options
         .shape
+        .as_ref()
+        .ok_or_else(|| {
+            Box::new(ShapeInferenceError::InferError {
+                op_name: "constant",
+                operation: operation.clone(),
+                source: GraphError::ShapeInferenceFailed {
+                    reason: "constant is missing its required shape".to_string(),
+                },
+            })
+        })?
         .iter()
         .copied()
         .map(Dimension::Static)
@@ -1350,31 +1360,25 @@ fn lstm_cell_output_shapes(
 }
 
 fn gru_cell_shape(
-    input: MLOperand,
+    _input: MLOperand,
     hidden_state: MLOperand,
-    hidden_size: u32,
+    _hidden_size: u32,
     operation: &Operation,
     graph: &GraphInfo,
 ) -> Result<OperandDescriptor> {
     let hidden_state_desc = &graph.operands[hidden_state.id].descriptor;
-    if !hidden_state_desc.shape.is_empty() {
+    if hidden_state_desc.shape.len() == 2 {
         return Ok(hidden_state_desc.clone());
-    }
-
-    let input_shape = &graph.operands[input.id].descriptor.shape;
-    if input_shape.len() == 2 && hidden_size > 0 {
-        return Ok(OperandDescriptor {
-            data_type: graph.operands[input.id].descriptor.data_type,
-            shape: to_dimension_vector(&[get_static_or_max_size(&input_shape[0]), hidden_size]),
-            pending_permutation: vec![],
-        });
     }
 
     Err(Box::new(ShapeInferenceError::InferError {
         op_name: "gruCell",
         operation: operation.clone(),
         source: GraphError::ShapeInferenceFailed {
-            reason: "unable to infer gruCell output shape".to_string(),
+            reason: format!(
+                "gruCell hiddenState must be rank 2, got rank {}",
+                hidden_state_desc.shape.len()
+            ),
         },
     })
     .into())
