@@ -3789,6 +3789,97 @@ mod test {
     }
 
     #[test]
+    fn rustnn_save_webnn_round_trips_packed_4bit_constants_and_executes() {
+        let _ = pretty_env_logger::try_init();
+        let context = MLContext::create(&MLContextOptions::new(MLPowerPreference::Default, false));
+        if matches!(context, Err(crate::error::Error::NoBackendAvailable { .. })) {
+            return;
+        }
+        let mut context = context.unwrap();
+
+        let uint4_desc =
+            MLOperandDescriptor::new(crate::operator_enums::MLOperandDataType::Uint4, vec![3]);
+        let int4_desc =
+            MLOperandDescriptor::new(crate::operator_enums::MLOperandDataType::Int4, vec![4]);
+        let scale_desc =
+            MLOperandDescriptor::new(crate::operator_enums::MLOperandDataType::Float32, vec![1]);
+        let output_desc =
+            MLOperandDescriptor::new(crate::operator_enums::MLOperandDataType::Float32, vec![7]);
+        let uint4_bytes = crate::graph::pack_uint4(&[0, 7, 15]);
+        let int4_bytes = crate::graph::pack_int4(&[-8, -1, 0, 7]);
+
+        let mut builder = MLGraphBuilder::new(&mut context).unwrap();
+        let uint4 = builder
+            .constant_from_bytes(&uint4_desc, uint4_bytes.clone())
+            .unwrap();
+        let int4 = builder
+            .constant_from_bytes(&int4_desc, int4_bytes.clone())
+            .unwrap();
+        let scale = builder.constant_from_slice(&scale_desc, &[1.0f32]).unwrap();
+        let uint4_float = builder.dequantize_linear(uint4, scale).unwrap();
+        let int4_float = builder.dequantize_linear(int4, scale).unwrap();
+        let output = builder.concat(&[uint4_float, int4_float], 0).unwrap();
+        let mut named_outputs = MLNamedOperands::new();
+        named_outputs.insert("output", output);
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let webnn_path = temp_dir.path().join("packed-4bit.webnn");
+        builder
+            .rustnn_save_webnn(&named_outputs, &webnn_path)
+            .unwrap();
+        drop(builder);
+
+        let archive_bytes = std::fs::read(webnn_path.with_extension("safetensors")).unwrap();
+        let (_, metadata) = safetensors::SafeTensors::read_metadata(&archive_bytes).unwrap();
+        assert_eq!(
+            metadata
+                .metadata()
+                .as_ref()
+                .and_then(|metadata| metadata.get(crate::webnn_save::PACKED_4BIT_METADATA_KEY))
+                .map(String::as_str),
+            Some(crate::webnn_save::PACKED_4BIT_METADATA_VERSION)
+        );
+        let archive = safetensors::SafeTensors::deserialize(&archive_bytes).unwrap();
+        let saved_uint4 = archive.tensor("operand_0").unwrap();
+        assert_eq!(saved_uint4.dtype(), safetensors::Dtype::U8);
+        assert_eq!(saved_uint4.shape(), [2]);
+        assert_eq!(saved_uint4.data(), uint4_bytes);
+        let saved_int4 = archive.tensor("operand_1").unwrap();
+        assert_eq!(saved_int4.dtype(), safetensors::Dtype::U8);
+        assert_eq!(saved_int4.shape(), [2]);
+        assert_eq!(saved_int4.data(), int4_bytes);
+        assert_eq!(
+            archive.tensor("operand_2").unwrap().dtype(),
+            safetensors::Dtype::F32
+        );
+
+        let loaded = crate::load_graph_from_path(&webnn_path).unwrap();
+        assert_eq!(
+            loaded.operands[0].descriptor.data_type,
+            crate::graph::DataType::Uint4
+        );
+        assert_eq!(loaded.operands[0].descriptor.static_or_max_shape(), vec![3]);
+        assert_eq!(loaded.constant_operand_ids_to_handles[&0].data, uint4_bytes);
+        assert_eq!(
+            loaded.operands[1].descriptor.data_type,
+            crate::graph::DataType::Int4
+        );
+        assert_eq!(loaded.operands[1].descriptor.static_or_max_shape(), vec![4]);
+        assert_eq!(loaded.constant_operand_ids_to_handles[&1].data, int4_bytes);
+
+        let mut graph = context.rustnn_build_graph(loaded).unwrap();
+        let mut output_tensor_desc = MLTensorDescriptor::from_operand_descriptor(&output_desc);
+        output_tensor_desc.set_readable(true);
+        let output_tensor = context.create_tensor(&output_tensor_desc).unwrap();
+        let inputs = MLNamedTensors::new();
+        let outputs = MLNamedTensors::from([("output", &output_tensor)]);
+        context.dispatch(&mut graph, &inputs, &outputs).unwrap();
+        let mut actual = vec![0.0f32; 7];
+        context.read_tensor(&output_tensor, &mut actual).unwrap();
+        assert_eq!(actual, vec![0.0, 7.0, 15.0, -8.0, -1.0, 0.0, 7.0]);
+    }
+
+    #[test]
     fn rustnn_save_webnn_emits_named_constant_weight_ref() {
         let _ = pretty_env_logger::try_init();
         let context = MLContext::create(&MLContextOptions::new(MLPowerPreference::Default, true));

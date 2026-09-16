@@ -5,15 +5,19 @@
 //! graph, and runs shape inference on import.
 
 use regex::Regex;
+use safetensors::{Dtype, SafeTensors};
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use webnn_graph::ast::{ConstInit, DataType as AstDataType, GraphJson};
 use webnn_graph::external_weights::WeightResolveError;
 
 use crate::error::GraphError;
 use crate::graph::GraphInfo;
 use crate::webnn_json;
+use crate::webnn_save::{PACKED_4BIT_METADATA_KEY, PACKED_4BIT_METADATA_VERSION};
 
 /// Sanitize WebNN text format identifiers by replacing dots and colons with underscores.
 ///
@@ -90,6 +94,173 @@ fn map_weight_resolve_error(err: WeightResolveError) -> GraphError {
         },
     }
 }
+fn packed_4bit_error(reason: impl Into<String>) -> GraphError {
+    GraphError::ConversionFailed {
+        format: "safetensors-packed4".to_string(),
+        reason: reason.into(),
+    }
+}
+
+fn sanitize_weight_key(name: &str) -> String {
+    name.replace("::", "__").replace('.', "_")
+}
+
+fn discover_external_weights(graph_path: &Path) -> Option<PathBuf> {
+    let stem = graph_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    [
+        graph_path.with_file_name(format!("{stem}.safetensors")),
+        graph_path.with_file_name(format!("{stem}.weights")),
+        graph_path.with_file_name("model.safetensors"),
+        graph_path.with_file_name("model.weights"),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
+}
+
+fn is_safetensors_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("safetensors")
+                || extension.eq_ignore_ascii_case("safetensor")
+        })
+}
+
+fn packed_byte_length(name: &str, shape: &[u32]) -> Result<usize, GraphError> {
+    let elements = shape.iter().try_fold(1usize, |count, &dimension| {
+        count.checked_mul(dimension as usize).ok_or_else(|| {
+            packed_4bit_error(format!("constant `{name}` element count overflows usize"))
+        })
+    })?;
+    Ok(elements.div_ceil(2))
+}
+
+/// Resolve RustNN's versioned packed-int4/uint4 SafeTensors extension before the generic
+/// webnn-graph resolver handles the archive's standard tensors.
+fn resolve_packed_4bit_weights(
+    graph_json: &mut GraphJson,
+    graph_path: &Path,
+) -> Result<(), GraphError> {
+    let packed_refs = graph_json.consts.values().any(|declaration| {
+        matches!(
+            declaration.data_type,
+            AstDataType::Int4 | AstDataType::Uint4
+        ) && matches!(declaration.init, ConstInit::Weights { .. })
+    });
+    if !packed_refs {
+        return Ok(());
+    }
+
+    let Some(weights_path) = discover_external_weights(graph_path) else {
+        return Ok(());
+    };
+    if !is_safetensors_path(&weights_path) {
+        return Ok(());
+    }
+
+    let bytes = fs::read(&weights_path).map_err(|source| GraphError::io(&weights_path, source))?;
+    let (_, metadata) = SafeTensors::read_metadata(&bytes).map_err(|error| {
+        packed_4bit_error(format!(
+            "failed to read `{}`: {error}",
+            weights_path.display()
+        ))
+    })?;
+    let marker = metadata
+        .metadata()
+        .as_ref()
+        .and_then(|metadata| metadata.get(PACKED_4BIT_METADATA_KEY));
+    match marker.map(String::as_str) {
+        Some(PACKED_4BIT_METADATA_VERSION) => {}
+        Some(version) => {
+            return Err(packed_4bit_error(format!(
+                "`{}` uses unsupported packed 4-bit format version `{version}`",
+                weights_path.display()
+            )));
+        }
+        None => {
+            return Err(packed_4bit_error(format!(
+                "`{}` contains external int4/uint4 weights but lacks the `{PACKED_4BIT_METADATA_KEY}` metadata marker",
+                weights_path.display()
+            )));
+        }
+    }
+
+    let tensors = SafeTensors::deserialize(&bytes).map_err(|error| {
+        packed_4bit_error(format!(
+            "failed to read `{}`: {error}",
+            weights_path.display()
+        ))
+    })?;
+    let mut sanitized_names: HashMap<String, String> = HashMap::new();
+    for name in tensors.names() {
+        let sanitized = sanitize_weight_key(name);
+        if let Some(previous) = sanitized_names.insert(sanitized.clone(), name.to_string())
+            && previous != name
+        {
+            return Err(packed_4bit_error(format!(
+                "ambiguous sanitized tensor name `{sanitized}` (both `{previous}` and `{name}`) in `{}`",
+                weights_path.display()
+            )));
+        }
+    }
+
+    for (constant_name, declaration) in graph_json.consts.iter_mut() {
+        if !matches!(
+            declaration.data_type,
+            AstDataType::Int4 | AstDataType::Uint4
+        ) {
+            continue;
+        }
+        let ConstInit::Weights { r#ref } = &declaration.init else {
+            continue;
+        };
+        let archive_name = if tensors.tensor(r#ref).is_ok() {
+            r#ref.clone()
+        } else {
+            sanitized_names.get(r#ref).cloned().ok_or_else(|| {
+                packed_4bit_error(format!(
+                    "packed 4-bit weight `{ref_name}` for constant `{constant_name}` is missing from `{}`",
+                    weights_path.display(),
+                    ref_name = r#ref
+                ))
+            })?
+        };
+        let tensor = tensors.tensor(&archive_name).map_err(|error| {
+            packed_4bit_error(format!(
+                "failed to read packed 4-bit weight `{archive_name}` from `{}`: {error}",
+                weights_path.display()
+            ))
+        })?;
+        let expected = packed_byte_length(constant_name, &declaration.shape)?;
+        if tensor.dtype() != Dtype::U8 {
+            return Err(packed_4bit_error(format!(
+                "packed 4-bit weight `{archive_name}` must use SafeTensors U8 storage, found {:?}",
+                tensor.dtype()
+            )));
+        }
+        if tensor.shape() != [expected] {
+            return Err(packed_4bit_error(format!(
+                "packed 4-bit weight `{archive_name}` storage shape {:?} does not match expected [{expected}] for logical shape {:?}",
+                tensor.shape(),
+                declaration.shape
+            )));
+        }
+        if tensor.data().len() != expected {
+            return Err(packed_4bit_error(format!(
+                "packed 4-bit weight `{archive_name}` has {} bytes, expected {expected}",
+                tensor.data().len()
+            )));
+        }
+        declaration.init = ConstInit::InlineBytes {
+            bytes: tensor.data().to_vec(),
+        };
+    }
+
+    Ok(())
+}
 
 /// Load a graph from a webnn-graph file (.webnn text or .json)
 ///
@@ -97,9 +268,11 @@ fn map_weight_resolve_error(err: WeightResolveError) -> GraphError {
 /// - `.webnn` - Text DSL format (parsed and converted to JSON)
 /// - `.json` - Direct JSON format (webnn-graph-json)
 ///
-/// When the graph contains `@weights` / `ConstInit::Weights` references, external tensors are
-/// resolved by [`webnn_graph::external_weights::resolve_external_weights`] (strict I/O
-/// and validation). See that module for file naming and behavior.
+/// When the graph contains `@weights` / `ConstInit::Weights` references, RustNN's versioned
+/// packed-4-bit SafeTensors extension is resolved first. The generic
+/// [`webnn_graph::external_weights::resolve_external_weights`] path then resolves every ordinary
+/// external constant with its existing strict I/O and validation behavior. See that module for
+/// file naming and discovery behavior.
 pub fn load_graph_from_path(path: impl AsRef<Path>) -> Result<GraphInfo, GraphError> {
     let path_ref = path.as_ref();
     let contents = fs::read_to_string(path_ref).map_err(|err| GraphError::io(path_ref, err))?;
@@ -136,6 +309,7 @@ pub fn load_graph_from_path(path: impl AsRef<Path>) -> Result<GraphInfo, GraphEr
         });
     };
 
+    resolve_packed_4bit_weights(&mut graph_json, path_ref)?;
     webnn_graph::external_weights::resolve_external_weights(&mut graph_json, path_ref, None, None)
         .map_err(map_weight_resolve_error)?;
 
@@ -158,6 +332,52 @@ mod tests {
     ) {
         let view = TensorView::new(Dtype::F32, shape, data).unwrap();
         let bytes = serialize(vec![(tensor_name.to_string(), view)], None).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+
+    fn packed_4bit_graph(weight_ref: &str) -> String {
+        format!(
+            r#"{{
+                "format": "webnn-graph-json",
+                "version": 1,
+                "inputs": {{}},
+                "consts": {{
+                    "q": {{
+                        "dataType": "uint4",
+                        "shape": [3],
+                        "init": {{ "kind": "weights", "ref": "{weight_ref}" }}
+                    }}
+                }},
+                "nodes": [{{
+                    "id": "identity_0",
+                    "op": "identity",
+                    "inputs": ["q"],
+                    "options": {{}},
+                    "outputs": ["y"]
+                }}],
+                "outputs": {{ "y": "y" }}
+            }}"#
+        )
+    }
+
+    fn write_test_safetensors(
+        path: &std::path::Path,
+        tensors: &[(&str, Dtype, Vec<usize>, Vec<u8>)],
+        marker: Option<&str>,
+    ) {
+        let views = tensors
+            .iter()
+            .map(|(name, dtype, shape, data)| {
+                (
+                    (*name).to_string(),
+                    TensorView::new(*dtype, shape.clone(), data).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let metadata = marker.map(|version| {
+            HashMap::from([(PACKED_4BIT_METADATA_KEY.to_string(), version.to_string())])
+        });
+        let bytes = serialize(views, metadata).unwrap();
         fs::write(path, bytes).unwrap();
     }
 
@@ -891,5 +1111,103 @@ mod tests {
         // Should match namespace separator (:: -> __)
         let result = load_graph_from_path(&graph_path);
         result.unwrap();
+    }
+
+    #[test]
+    fn test_packed_4bit_safetensors_requires_version_marker() {
+        let temp_dir = TempDir::new().unwrap();
+        let graph_path = temp_dir.path().join("model.json");
+        fs::write(&graph_path, packed_4bit_graph("q")).unwrap();
+        write_test_safetensors(
+            &graph_path.with_extension("safetensors"),
+            &[("q", Dtype::U8, vec![2], vec![0x70, 0x0f])],
+            None,
+        );
+
+        let error = load_graph_from_path(&graph_path).unwrap_err().to_string();
+        assert!(error.contains(PACKED_4BIT_METADATA_KEY), "{error}");
+    }
+
+    #[test]
+    fn test_packed_4bit_safetensors_rejects_unknown_version() {
+        let temp_dir = TempDir::new().unwrap();
+        let graph_path = temp_dir.path().join("model.json");
+        fs::write(&graph_path, packed_4bit_graph("q")).unwrap();
+        write_test_safetensors(
+            &graph_path.with_extension("safetensors"),
+            &[("q", Dtype::U8, vec![2], vec![0x70, 0x0f])],
+            Some("2"),
+        );
+
+        let error = load_graph_from_path(&graph_path).unwrap_err().to_string();
+        assert!(
+            error.contains("unsupported packed 4-bit format version"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn test_packed_4bit_safetensors_requires_u8_storage() {
+        let temp_dir = TempDir::new().unwrap();
+        let graph_path = temp_dir.path().join("model.json");
+        fs::write(&graph_path, packed_4bit_graph("q")).unwrap();
+        write_test_safetensors(
+            &graph_path.with_extension("safetensors"),
+            &[("q", Dtype::I8, vec![2], vec![0x70, 0x0f])],
+            Some(PACKED_4BIT_METADATA_VERSION),
+        );
+
+        let error = load_graph_from_path(&graph_path).unwrap_err().to_string();
+        assert!(error.contains("must use SafeTensors U8 storage"), "{error}");
+    }
+
+    #[test]
+    fn test_packed_4bit_safetensors_validates_storage_shape_and_length() {
+        let temp_dir = TempDir::new().unwrap();
+        let graph_path = temp_dir.path().join("model.json");
+        fs::write(&graph_path, packed_4bit_graph("q")).unwrap();
+        write_test_safetensors(
+            &graph_path.with_extension("safetensors"),
+            &[("q", Dtype::U8, vec![1], vec![0x70])],
+            Some(PACKED_4BIT_METADATA_VERSION),
+        );
+
+        let error = load_graph_from_path(&graph_path).unwrap_err().to_string();
+        assert!(error.contains("storage shape"), "{error}");
+        assert!(error.contains("expected [2]"), "{error}");
+    }
+
+    #[test]
+    fn test_packed_4bit_safetensors_reports_missing_weight() {
+        let temp_dir = TempDir::new().unwrap();
+        let graph_path = temp_dir.path().join("model.json");
+        fs::write(&graph_path, packed_4bit_graph("missing")).unwrap();
+        write_test_safetensors(
+            &graph_path.with_extension("safetensors"),
+            &[("other", Dtype::U8, vec![2], vec![0x70, 0x0f])],
+            Some(PACKED_4BIT_METADATA_VERSION),
+        );
+
+        let error = load_graph_from_path(&graph_path).unwrap_err().to_string();
+        assert!(error.contains("is missing"), "{error}");
+        assert!(error.contains("missing"), "{error}");
+    }
+
+    #[test]
+    fn test_packed_4bit_safetensors_rejects_ambiguous_sanitized_names() {
+        let temp_dir = TempDir::new().unwrap();
+        let graph_path = temp_dir.path().join("model.json");
+        fs::write(&graph_path, packed_4bit_graph("a__b")).unwrap();
+        write_test_safetensors(
+            &graph_path.with_extension("safetensors"),
+            &[
+                ("a..b", Dtype::U8, vec![2], vec![0x70, 0x0f]),
+                ("a::b", Dtype::U8, vec![2], vec![0x70, 0x0f]),
+            ],
+            Some(PACKED_4BIT_METADATA_VERSION),
+        );
+
+        let error = load_graph_from_path(&graph_path).unwrap_err().to_string();
+        assert!(error.contains("ambiguous sanitized tensor name"), "{error}");
     }
 }
