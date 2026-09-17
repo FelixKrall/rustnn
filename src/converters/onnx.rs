@@ -2469,7 +2469,8 @@ impl crate::converters::GraphConverter for OnnxConverter {
                     if let Some(input_operand) = graph.operand(input_id) {
                         type_overrides.insert(output_id, input_operand.descriptor.data_type);
                     }
-                    // WebNN slice has starts, sizes, strides; derive ends as starts[i] + sizes[i] for default stride 1
+                    // WebNN slice sizes are input extents, so ONNX ends are start + size
+                    // regardless of the stride.
                     let starts: Vec<i64> = st.iter().map(|&u| u as i64).collect();
                     let sizes: Vec<i64> = sz.iter().map(|d| d.static_or_max() as i64).collect();
                     let strides: Vec<i64> = if opts.strides.is_empty() {
@@ -2479,9 +2480,8 @@ impl crate::converters::GraphConverter for OnnxConverter {
                     };
                     let ends: Vec<i64> = (0..starts.len())
                         .map(|i| {
-                            let step = strides.get(i).copied().unwrap_or(1);
                             let sz = sizes.get(i).copied().unwrap_or(0);
-                            starts[i] + sz * step
+                            starts[i] + sz
                         })
                         .collect();
                     let axes: Vec<i64> = (0..starts.len() as i64).collect();
@@ -12464,5 +12464,63 @@ mod tests {
 
         assert_eq!(hidden.data[0], 3.0, "hidden_out[0]");
         assert_eq!(cell.data[0], 3.0, "cell_out[0]");
+    }
+
+    #[test]
+    fn strided_slice_uses_extent_for_onnx_end() {
+        let graph = GraphInfo {
+            operands: vec![
+                Operand {
+                    kind: OperandKind::Input,
+                    descriptor: OperandDescriptor {
+                        data_type: DataType::Float32,
+                        shape: s(&[10]),
+                        pending_permutation: vec![],
+                    },
+                    name: Some("x".to_string()),
+                },
+                Operand {
+                    kind: OperandKind::Output,
+                    descriptor: OperandDescriptor {
+                        data_type: DataType::Float32,
+                        shape: s(&[4]),
+                        pending_permutation: vec![],
+                    },
+                    name: Some("y".to_string()),
+                },
+            ],
+            input_operands: vec![0],
+            output_operands: vec![1],
+            operations: vec![Operation::Slice {
+                input: 0,
+                starts: vec![1],
+                sizes: vec![crate::operator_options::MLDimension::Static(8)],
+                options: Some(crate::operator_options::MLSliceOptions {
+                    label: "slice".to_string(),
+                    strides: vec![2],
+                }),
+                outputs: vec![1],
+            }],
+            ..GraphInfo::default()
+        };
+
+        let model =
+            ModelProto::decode(OnnxConverter.convert(&graph).unwrap().data.as_slice()).unwrap();
+        let graph = model.graph.unwrap();
+        let slice = graph
+            .node
+            .iter()
+            .find(|node| node.op_type == "Slice")
+            .expect("Slice node");
+        let initializer = |input_index: usize| {
+            graph
+                .initializer
+                .iter()
+                .find(|tensor| tensor.name == slice.input[input_index])
+                .expect("Slice initializer")
+        };
+        assert_eq!(initializer(1).int64_data, vec![1]);
+        assert_eq!(initializer(2).int64_data, vec![9]);
+        assert_eq!(initializer(4).int64_data, vec![2]);
     }
 }

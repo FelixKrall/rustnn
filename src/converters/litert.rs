@@ -50,6 +50,19 @@ impl GraphConverter for LiteRtConverter {
 
 // ---- Native TFLite conversion ----
 
+fn slice_ends_from_extents(
+    starts: &[u32],
+    sizes: &[crate::operator_options::MLDimension],
+) -> Vec<i32> {
+    starts
+        .iter()
+        .zip(sizes.iter())
+        .map(|(&start, size)| {
+            start as i32 + crate::operator_options::MLDimension::static_or_max(size) as i32
+        })
+        .collect()
+}
+
 macro_rules! scalar_const {
     ($ctx:expr, $name:expr, $val:expr, $tfl_type:expr) => {{
         let bytes = match $tfl_type {
@@ -2235,16 +2248,7 @@ impl<'a> TfliteContext<'a> {
             );
             let begins_idx = begins_tensor as i32;
             if has_strides {
-                let ends: Vec<i32> = starts
-                    .iter()
-                    .zip(sizes.iter())
-                    .zip(strides.iter())
-                    .map(|((&s, sz), &stride)| {
-                        s as i32
-                            + crate::operator_options::MLDimension::static_or_max(sz) as i32
-                                * stride as i32
-                    })
-                    .collect();
+                let ends = slice_ends_from_extents(starts, sizes);
                 let ends_tensor = self.add_constant(
                     "slice_ends",
                     &[ends.len() as i32],
@@ -4728,6 +4732,12 @@ mod tests {
 
     fn s(shape: &[u32]) -> Vec<crate::graph::Dimension> {
         to_dimension_vector(shape)
+    }
+
+    #[test]
+    fn strided_slice_ends_use_extents() {
+        let sizes = vec![crate::operator_options::MLDimension::Static(8)];
+        assert_eq!(slice_ends_from_extents(&[1], &sizes), vec![9]);
     }
 
     fn op(op_type: &str, inputs: &[u32], outputs: &[u32]) -> Operation {
