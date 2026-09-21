@@ -330,6 +330,7 @@ pub fn build_method_args(
         }
 
         if let Some(arr) = value.as_array()
+            && !arr.is_empty()
             && arr.iter().all(|x| is_operand_ref(x, operand_names))
         {
             let ops: Vec<MLOperand> = arr
