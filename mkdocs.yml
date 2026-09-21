@@ -76,6 +76,7 @@ nav:
       - API Overview: user-guide/api-reference.md
       - Backends: user-guide/backends.md
       - Examples: user-guide/examples.md
+      - WebNN graph files: user-guide/webnn-files.md
       - Advanced Topics: user-guide/advanced.md
       - Troubleshooting: user-guide/troubleshooting.md
       - Rust API Reference (rustdoc, deployed from main): https://rustnn.github.io/rustnn/api/rustnn/
