@@ -28,11 +28,13 @@ impl GraphRecorder {
         self.graph.quantized = quantized;
     }
 
+    /// Returns the contiguous operand IDs expected for the next outputs.
     pub(crate) fn next_output_ids(&self, count: usize) -> Vec<u32> {
         let base = self.graph.operands.len() as u32;
         (0..count as u32).map(|offset| base + offset).collect()
     }
 
+    /// Appends a named input and returns its operand ID.
     pub(crate) fn add_input(&mut self, name: String, descriptor: OperandDescriptor) -> u32 {
         let id = self.graph.operands.len() as u32;
         self.graph.operands.push(Operand {
@@ -44,6 +46,7 @@ impl GraphRecorder {
         id
     }
 
+    /// Appends a constant and optionally associates its external tensor name.
     pub(crate) fn add_constant(
         &mut self,
         name: Option<String>,
@@ -66,6 +69,7 @@ impl GraphRecorder {
         id
     }
 
+    /// Infers output descriptors and then appends the operation atomically.
     pub(crate) fn record_operation(
         &mut self,
         operation: Operation,
@@ -127,6 +131,7 @@ impl GraphRecorder {
             .collect())
     }
 
+    /// Marks an existing intermediate operand as a named graph output.
     pub(crate) fn mark_output(&mut self, id: u32, name: String) -> Result<(), GraphBuilderError> {
         let operand = self.graph.operands.get_mut(id as usize).ok_or(
             GraphBuilderError::BuildWithInvalidOperand {
@@ -158,6 +163,7 @@ impl GraphRecorder {
         Ok(())
     }
 
+    /// Validates the I/O lists and returns the completed graph.
     pub(crate) fn into_graph(self) -> Result<GraphInfo, GraphBuilderError> {
         self.graph.validate_io_operand_lists().map_err(|error| {
             GraphBuilderError::InconsistentGraphInfo {
