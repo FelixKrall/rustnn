@@ -3835,9 +3835,9 @@ mod test {
             metadata
                 .metadata()
                 .as_ref()
-                .and_then(|metadata| metadata.get(crate::webnn_save::PACKED_4BIT_METADATA_KEY))
+                .and_then(|metadata| metadata.get(webnn_graph::PACKED_4BIT_METADATA_KEY))
                 .map(String::as_str),
-            Some(crate::webnn_save::PACKED_4BIT_METADATA_VERSION)
+            Some(webnn_graph::PACKED_4BIT_METADATA_VERSION)
         );
         let archive = safetensors::SafeTensors::deserialize(&archive_bytes).unwrap();
         let saved_uint4 = archive.tensor("operand_0").unwrap();

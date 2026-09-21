@@ -466,7 +466,8 @@ pub struct MLConstantOptions {
     pub data: Option<String>, // base64
     /// WebNN data type name of the constant.
     pub data_type: String,
-    /// Shape of the constant.
+    /// Required constant shape. `Some(vec![])` is a rank-0 scalar; `None`
+    /// means the shape was omitted and is rejected before entering `GraphInfo`.
     #[serde(default)]
     pub shape: Option<Vec<u32>>,
 }

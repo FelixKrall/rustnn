@@ -408,6 +408,11 @@ pub(crate) fn to_graph_json_with_consts(
 /// Convert GraphJson to GraphInfo using the same recorder and shape inference as
 /// the public `MLGraphBuilder` API.
 pub fn from_graph_json(graph_json: &GraphJson) -> Result<GraphInfo, GraphError> {
+    from_graph_json_owned(graph_json.clone())
+}
+
+/// Converts an owned GraphJson without cloning inline constant buffers.
+pub fn from_graph_json_owned(graph_json: GraphJson) -> Result<GraphInfo, GraphError> {
     fn conversion_error(reason: impl Into<String>) -> GraphError {
         GraphError::ConversionFailed {
             format: "webnn-graph-json".to_string(),
@@ -428,11 +433,19 @@ pub fn from_graph_json(graph_json: &GraphJson) -> Result<GraphInfo, GraphError> 
         Ok(())
     }
 
+    let GraphJson {
+        quantized,
+        inputs,
+        consts,
+        nodes,
+        outputs,
+        ..
+    } = graph_json;
     let mut recorder = GraphRecorder::new();
-    recorder.set_quantized(graph_json.quantized);
+    recorder.set_quantized(quantized);
     let mut operand_map: BTreeMap<String, u32> = BTreeMap::new();
 
-    for (name, desc) in &graph_json.inputs {
+    for (name, desc) in &inputs {
         ensure_new_name(&operand_map, name, "input")?;
         let id = recorder.add_input(
             name.clone(),
@@ -445,10 +458,10 @@ pub fn from_graph_json(graph_json: &GraphJson) -> Result<GraphInfo, GraphError> 
         operand_map.insert(name.clone(), id);
     }
 
-    for (name, const_decl) in &graph_json.consts {
-        ensure_new_name(&operand_map, name, "constant")?;
-        let data = match &const_decl.init {
-            ConstInit::InlineBytes { bytes } => bytes.clone(),
+    for (name, const_decl) in consts {
+        ensure_new_name(&operand_map, &name, "constant")?;
+        let data = match const_decl.init {
+            ConstInit::InlineBytes { bytes } => bytes,
             // External tensor data is populated by the safetensors loader after parsing.
             ConstInit::Weights { r#ref: _ } => Vec::new(),
             ConstInit::Scalar { value } => {
@@ -500,7 +513,7 @@ pub fn from_graph_json(graph_json: &GraphJson) -> Result<GraphInfo, GraphError> 
         operand_map.insert(name.clone(), id);
     }
 
-    for node in &graph_json.nodes {
+    for node in &nodes {
         let input_ids = node
             .inputs
             .iter()
@@ -577,7 +590,7 @@ pub fn from_graph_json(graph_json: &GraphJson) -> Result<GraphInfo, GraphError> 
     }
 
     let mut marked_outputs = HashSet::new();
-    for (binding_name, operand_ref) in &graph_json.outputs {
+    for (binding_name, operand_ref) in &outputs {
         let id = operand_map.get(operand_ref).copied().ok_or_else(|| {
             conversion_error(format!(
                 "graph output '{binding_name}' references unknown operand '{operand_ref}'"
@@ -2102,5 +2115,47 @@ mod tests {
         };
         let error = from_graph_json(&graph_json).unwrap_err();
         assert!(error.to_string().contains("missing or forward reference"));
+    }
+
+    #[test]
+    fn owned_graph_json_moves_inline_constant_bytes() {
+        let bytes = vec![0_u8, 0, 128, 63, 0, 0, 0, 64];
+        let original_pointer = bytes.as_ptr();
+        let graph_json = GraphJson {
+            format: "webnn-graph-json".to_string(),
+            version: 2,
+            name: Some("owned".to_string()),
+            quantized: false,
+            inputs: BTreeMap::new(),
+            consts: BTreeMap::from([(
+                "weight".to_string(),
+                webnn_graph::ast::ConstDecl {
+                    data_type: webnn_graph::ast::DataType::Float32,
+                    shape: vec![2],
+                    init: ConstInit::InlineBytes { bytes },
+                },
+            )]),
+            nodes: vec![webnn_graph::ast::Node {
+                id: "identity".to_string(),
+                op: "identity".to_string(),
+                inputs: vec!["weight".to_string()],
+                options: serde_json::Map::new(),
+                outputs: Some(vec!["result".to_string()]),
+            }],
+            outputs: BTreeMap::from([("result".to_string(), "result".to_string())]),
+        };
+        let borrowed = from_graph_json(&graph_json).unwrap();
+        let owned = from_graph_json_owned(graph_json).unwrap();
+
+        assert_eq!(borrowed.operands.len(), owned.operands.len());
+        assert_eq!(borrowed.operations.len(), owned.operations.len());
+        assert_eq!(
+            borrowed.constant_operand_ids_to_handles[&0].data,
+            owned.constant_operand_ids_to_handles[&0].data
+        );
+        assert_eq!(
+            owned.constant_operand_ids_to_handles[&0].data.as_ptr(),
+            original_pointer
+        );
     }
 }
