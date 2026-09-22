@@ -792,6 +792,44 @@ mod test {
     }
 
     #[test]
+    fn coreml_not_equal_uint8_promotes_inputs_and_executes() {
+        let _ = pretty_env_logger::try_init();
+        let Some(mut context) = coreml_context() else {
+            return;
+        };
+
+        let desc = MLOperandDescriptor::new(MLOperandDataType::Uint8, vec![5]);
+        let mut builder = MLGraphBuilder::new(&mut context).unwrap();
+        let a = builder.input("a", &desc).unwrap();
+        let b = builder.input("b", &desc).unwrap();
+        let output = builder.not_equal(a, b).unwrap();
+        let mut outputs = MLNamedOperands::new();
+        outputs.insert("out", output);
+        let mut graph = builder.build(&outputs).unwrap();
+
+        let mut io_desc = MLTensorDescriptor::from_operand_descriptor(&desc);
+        io_desc.set_writable(true);
+        io_desc.set_readable(true);
+        let a = context.create_tensor(&io_desc).unwrap();
+        let b = context.create_tensor(&io_desc).unwrap();
+        let out = context.create_tensor(&io_desc).unwrap();
+
+        context.write_tensor(&a, &[0u8, 1, 2, 255, 5]).unwrap();
+        context.write_tensor(&b, &[0u8, 0, 2, 4, 255]).unwrap();
+        context
+            .dispatch(
+                &mut graph,
+                &MLNamedTensors::from([("a", &a), ("b", &b)]),
+                &MLNamedTensors::from([("out", &out)]),
+            )
+            .unwrap();
+
+        let mut result = vec![0u8; 5];
+        context.read_tensor(&out, &mut result).unwrap();
+        assert_eq!(result, [0, 1, 0, 1, 1]);
+    }
+
+    #[test]
     fn coreml_add_int32_byte_path() {
         let _ = pretty_env_logger::try_init();
         let Some(mut context) = coreml_context() else {

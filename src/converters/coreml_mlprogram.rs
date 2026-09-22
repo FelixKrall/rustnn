@@ -6160,6 +6160,49 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                 let mut input_names =
                     Self::input_names_for_operation(graph_info, op, &operand_name_overrides);
 
+                // WebNN allows every operand data type for comparisons, but only requires
+                // float32, float16, and int32 support. CoreML's comparison operations reject
+                // int8/uint8 inputs, so losslessly promote those values to int32 in the
+                // backend-specific MIL program. Keep this legalization here rather than in the
+                // recorded GraphInfo so other backends retain their native 8-bit comparisons.
+                if matches!(
+                    op_type_lower.as_str(),
+                    "equal"
+                        | "greater"
+                        | "greaterorequal"
+                        | "lesser"
+                        | "lesserorequal"
+                        | "notequal"
+                ) {
+                    for (index, &input_id) in op.input_operands().iter().enumerate() {
+                        let input_operand = graph_info.operand(input_id).ok_or_else(|| {
+                            GraphError::ConversionFailed {
+                                format: "coreml_mlprogram".to_string(),
+                                reason: format!("Input operand {} not found", input_id),
+                            }
+                        })?;
+                        if matches!(
+                            input_operand.descriptor.data_type,
+                            DataType::Int8 | DataType::Uint8
+                        ) {
+                            let promoted_name =
+                                format!("{}_int32_{}_{}", input_names[index], output_id, index);
+                            let promoted_type = Self::create_value_with_mil_type(
+                                graph_info,
+                                input_id,
+                                promoted_name.clone(),
+                                MilDataType::Int32 as i32,
+                            )?;
+                            main_block.operations.push(Self::create_cast_operation(
+                                input_names[index].clone(),
+                                promoted_type,
+                                "int32",
+                            ));
+                            input_names[index] = promoted_name;
+                        }
+                    }
+                }
+
                 if matches!(
                     op_type_lower.as_str(),
                     "logicalnot" | "logicaland" | "logicalor" | "logicalxor"
@@ -11611,6 +11654,72 @@ mod tests {
         {
             crate::protos::coreml::mil_spec::value_type::Type::TensorType(tensor) => tensor,
             _ => panic!("expected tensor type for {}", output.name),
+        }
+    }
+
+    #[test]
+    fn comparisons_promote_8_bit_inputs_to_int32() {
+        use crate::protos::coreml::mil_spec::DataType as MilDataType;
+
+        for data_type in [DataType::Int8, DataType::Uint8] {
+            for op_type in [
+                "equal",
+                "notEqual",
+                "greater",
+                "greaterOrEqual",
+                "lesser",
+                "lesserOrEqual",
+            ] {
+                let operand = |name: &str, kind, data_type| Operand {
+                    name: Some(name.to_string()),
+                    kind,
+                    descriptor: OperandDescriptor {
+                        data_type,
+                        shape: s(&[4]),
+                        pending_permutation: vec![],
+                    },
+                };
+                let graph = GraphInfo {
+                    operands: vec![
+                        operand("lhs", OperandKind::Input, data_type.clone()),
+                        operand("rhs", OperandKind::Input, data_type.clone()),
+                        operand("result", OperandKind::Output, DataType::Uint8),
+                    ],
+                    input_operands: vec![0, 1],
+                    output_operands: vec![2],
+                    operations: vec![op_from_operator_options(
+                        op_type,
+                        vec![0, 1],
+                        Some(2),
+                        vec![],
+                        OperatorOptions::default(),
+                    )],
+                    constant_operand_ids_to_handles: HashMap::new(),
+                    id_to_constant_tensor_operand_map: HashMap::new(),
+                    quantized: false,
+                };
+
+                let converted = CoremlMlProgramConverter
+                    .convert(&graph)
+                    .expect("CoreML 8-bit comparison conversion");
+                let main_block = decode_main_block(&converted.data);
+                let promotions: Vec<_> = main_block
+                    .operations
+                    .iter()
+                    .filter(|op| {
+                        op.r#type == mil_ops::CAST
+                            && op
+                                .outputs
+                                .first()
+                                .is_some_and(|output| output.name.contains("_int32_"))
+                    })
+                    .collect();
+                assert_eq!(promotions.len(), 2, "one promotion per {op_type} input");
+                assert!(promotions.iter().all(|op| {
+                    mil_tensor_type(op.outputs.first().expect("cast output")).data_type
+                        == MilDataType::Int32 as i32
+                }));
+            }
         }
     }
 
