@@ -425,6 +425,38 @@ impl CoremlMlProgramConverter {
         Ok((name, value_type))
     }
 
+    /// Bounds for the retained band, or its complement when the main diagonal
+    /// is excluded. MIL treats every negative width as unlimited, not an offset.
+    fn triangular_band_bounds(
+        shape: &[GraphDimension],
+        upper: bool,
+        diagonal: i32,
+    ) -> Result<(i32, i32), GraphError> {
+        if shape.len() < 2 {
+            return Err(GraphError::ConversionFailed {
+                format: "coreml_mlprogram".to_string(),
+                reason: "triangular requires an input of rank at least two".to_string(),
+            });
+        }
+        let excludes_main = (upper && diagonal > 0) || (!upper && diagonal < 0);
+        let limits_lower = upper != excludes_main;
+        let axis = shape.len() - if limits_lower { 2 } else { 1 };
+        let largest_offset = shape[axis].get_static_or_max_size().saturating_sub(1);
+        // Promote before abs so i32::MIN is valid. A wider band is equivalent
+        // for every active shape within this bound; no runtime extent is frozen.
+        let width =
+            (i64::from(diagonal).abs() - i64::from(excludes_main)).min(i64::from(largest_offset));
+        let width = i32::try_from(width).map_err(|_| GraphError::ConversionFailed {
+            format: "coreml_mlprogram".to_string(),
+            reason: "triangular band width exceeds the CoreML int32 range".to_string(),
+        })?;
+        Ok(if limits_lower {
+            (width, -1)
+        } else {
+            (-1, width)
+        })
+    }
+
     fn interface_mil_data_type(data_type: &DataType) -> i32 {
         use crate::protos::coreml::mil_spec::DataType as MilDataType;
 
@@ -5221,7 +5253,7 @@ impl CoremlMlProgramConverter {
                 );
             }
 
-            Operation::Triangular { options, .. } => {
+            Operation::Triangular { input, options, .. } => {
                 // band_part: x, lower, upper
                 if !input_names.is_empty() {
                     inputs.insert("x".to_string(), Self::create_argument(&input_names[0]));
@@ -5229,18 +5261,14 @@ impl CoremlMlProgramConverter {
 
                 // CoreML band_part uses lower and upper bounds instead of upper/diagonal
                 let is_upper = options.as_ref().and_then(|o| o.upper).unwrap_or(true);
-                let diagonal = options.as_ref().map(|o| o.diagonal as i64).unwrap_or(0);
-
-                // Convert WebNN (upper, diagonal) to CoreML (lower, upper)
-                // For upper triangle: keep diagonal and above
-                // For lower triangle: keep diagonal and below
-                let (lower_bound, upper_bound) = if is_upper {
-                    // Upper triangle: remove elements below diagonal+k
-                    (diagonal as i32, -1) // keep from diagonal+k upward
-                } else {
-                    // Lower triangle: remove elements above diagonal+k
-                    (-1, diagonal as i32) // keep from diagonal+k downward
-                };
+                let diagonal = options.as_ref().map(|o| o.diagonal).unwrap_or(0);
+                let operand = graph.operand(*input).ok_or_else(|| GraphError::ConversionFailed {
+                    format: "coreml_mlprogram".to_string(),
+                    reason: format!("triangular input operand {input} not found"),
+                })?;
+                let (lower_bound, upper_bound) = Self::triangular_band_bounds(
+                    &operand.descriptor.shape, is_upper, diagonal,
+                )?;
 
                 inputs.insert(
                     "lower".to_string(),
@@ -7586,17 +7614,14 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                 }
             }
 
-            // Special handling for triangular with non-zero diagonal k.
-            // CoreML band_part(x, lower, upper) keeps the band -lower <= row-col <= upper.
-            // For upper=true, k>0: the result is input minus the band up to diagonal k-1.
-            //   result = input - band_part(input, -1, k-1)
-            // For upper=false, k<0: the result is input minus the band from diagonal -(|k|-1).
-            //   result = input - band_part(input, |k|-1, -1)
+            // band_part always retains the main diagonal. To exclude it, build
+            // the complementary band from ones and select the input or zero.
+            // Subtracting band_part(x) from x would turn masked NaN/Inf into NaN.
             if op_type_lower == "triangular" {
                 let (is_upper, diagonal) = match &op {
                     Operation::Triangular { options, .. } => (
                         options.as_ref().and_then(|o| o.upper).unwrap_or(true),
-                        options.as_ref().map(|o| o.diagonal as i64).unwrap_or(0),
+                        options.as_ref().map(|o| o.diagonal).unwrap_or(0),
                     ),
                     _ => (true, 0),
                 };
@@ -7627,63 +7652,111 @@ impl super::GraphConverter for CoremlMlProgramConverter {
                         input_id,
                         &operand_name_overrides,
                     );
-                    let dtype = Self::mil_data_type(&input_operand.descriptor.data_type)?;
-                    let dimensions = Self::mil_dimensions_from_graph_shape(
-                        &input_operand.descriptor.shape,
-                        false,
-                    );
-                    let band_value_type = ValueType {
-                        r#type: Some(
-                            crate::protos::coreml::mil_spec::value_type::Type::TensorType(
-                                TensorType {
-                                    rank: dimensions.len() as i64,
-                                    data_type: dtype,
-                                    dimensions,
-                                    attributes: HashMap::new(),
-                                },
-                            ),
-                        ),
-                    };
+                    let shape = &input_operand.descriptor.shape;
+                    let integer_input = input_operand.descriptor.data_type == DataType::Int32;
+                    let ones_name = format!("{output_name}_triangular_ones");
                     let band_name = format!("{}_triangular_band", output_name);
-
-                    // Compute band_part bounds for the subtracted region.
-                    // upper=true, k>0: subtract band_part(input, -1, k-1)
-                    // upper=false, k<0: subtract band_part(input, |k|-1, -1)
-                    let (band_lower, band_upper): (i64, i64) = if is_upper {
-                        (-1, diagonal - 1)
+                    let keep_name = format!("{output_name}_triangular_keep");
+                    let band_type = if integer_input {
+                        crate::protos::coreml::mil_spec::DataType::Int32 as i32
                     } else {
-                        ((-diagonal) - 1, -1)
+                        crate::protos::coreml::mil_spec::DataType::Float32 as i32
                     };
+                    let bool_type = crate::protos::coreml::mil_spec::DataType::Bool as i32;
+
+                    // fill_like follows the actual input shape, including both
+                    // dynamically sized matrix axes and any batch dimensions.
+                    if !integer_input {
+                        let mut fill_inputs = HashMap::new();
+                        fill_inputs.insert(
+                            "ref_tensor".to_string(),
+                            Self::create_name_argument(input_name.clone()),
+                        );
+                        fill_inputs.insert("value".to_string(), Self::create_immediate_float(1.0));
+                        main_block.operations.push(Self::create_mil_operation(
+                            "fill_like",
+                            fill_inputs,
+                            vec![Self::create_named_value_type(
+                                ones_name.clone(),
+                                band_type,
+                                shape,
+                                false,
+                            )],
+                        ));
+                    }
+
+                    let (band_lower, band_upper) =
+                        Self::triangular_band_bounds(shape, is_upper, diagonal)?;
 
                     let mut band_inputs: HashMap<String, Argument> = HashMap::new();
                     band_inputs.insert(
                         "x".to_string(),
-                        Self::create_name_argument(input_name.clone()),
+                        Self::create_name_argument(if integer_input {
+                            input_name.clone()
+                        } else {
+                            ones_name
+                        }),
                     );
                     band_inputs.insert(
                         "lower".to_string(),
-                        Self::create_immediate_int(band_lower as i32 as u32),
+                        Self::create_immediate_int(band_lower as u32),
                     );
                     band_inputs.insert(
                         "upper".to_string(),
-                        Self::create_immediate_int(band_upper as i32 as u32),
+                        Self::create_immediate_int(band_upper as u32),
                     );
                     main_block.operations.push(Self::create_mil_operation(
                         "band_part",
                         band_inputs,
-                        vec![NamedValueType {
-                            name: band_name.clone(),
-                            r#type: Some(band_value_type),
-                        }],
+                        vec![Self::create_named_value_type(
+                            band_name.clone(),
+                            band_type,
+                            shape,
+                            false,
+                        )],
                     ));
 
-                    // result = input - band
-                    let mut sub_inputs: HashMap<String, Argument> = HashMap::new();
-                    sub_inputs.insert("x".to_string(), Self::create_name_argument(input_name));
-                    sub_inputs.insert("y".to_string(), Self::create_name_argument(band_name));
+                    if integer_input {
+                        // Keep typed integer arithmetic: CoreML select can lose
+                        // int32 precision beyond 2^24 even with URL compilation.
+                        // x-x and x-0 are exact for integers and cannot overflow.
+                        let mut sub_inputs = HashMap::new();
+                        sub_inputs.insert("x".to_string(), Self::create_name_argument(input_name));
+                        sub_inputs.insert("y".to_string(), Self::create_name_argument(band_name));
+                        main_block.operations.push(Self::create_mil_operation(
+                            "sub",
+                            sub_inputs,
+                            vec![output_type],
+                        ));
+                        continue;
+                    }
+
+                    let mut equal_inputs = HashMap::new();
+                    equal_inputs.insert("x".to_string(), Self::create_name_argument(band_name));
+                    equal_inputs.insert("y".to_string(), Self::create_immediate_float(0.0));
                     main_block.operations.push(Self::create_mil_operation(
-                        "sub",
-                        sub_inputs,
+                        "equal",
+                        equal_inputs,
+                        vec![Self::create_named_value_type(
+                            keep_name.clone(),
+                            bool_type,
+                            shape,
+                            false,
+                        )],
+                    ));
+
+                    let zero = match input_operand.descriptor.data_type {
+                        DataType::Float16 => Self::create_immediate_float16(0.0),
+                        DataType::Float32 => Self::create_immediate_float(0.0),
+                        _ => Self::create_immediate_int(0),
+                    };
+                    let mut select_inputs = HashMap::new();
+                    select_inputs.insert("cond".to_string(), Self::create_name_argument(keep_name));
+                    select_inputs.insert("a".to_string(), Self::create_name_argument(input_name));
+                    select_inputs.insert("b".to_string(), zero);
+                    main_block.operations.push(Self::create_mil_operation(
+                        "select",
+                        select_inputs,
                         vec![output_type],
                     ));
 
@@ -10423,6 +10496,140 @@ mod tests {
 
     fn s(shape: &[u32]) -> Vec<crate::graph::Dimension> {
         crate::graph::to_dimension_vector(shape)
+    }
+
+    #[test]
+    fn triangular_band_widths_are_nonnegative_and_bounded() {
+        let shape = s(&[3, 5]);
+        for (upper, diagonal, expected) in [
+            (true, -1, (1, -1)),
+            (true, 0, (0, -1)),
+            (false, 0, (-1, 0)),
+            (false, 2, (-1, 2)),
+            // Excluded-main cases describe the complementary band.
+            (true, 2, (-1, 1)),
+            (false, -2, (1, -1)),
+            (true, i32::MIN, (2, -1)),
+            (false, i32::MIN, (2, -1)),
+            (true, i32::MAX, (-1, 4)),
+            (false, i32::MAX, (-1, 4)),
+        ] {
+            assert_eq!(
+                CoremlMlProgramConverter::triangular_band_bounds(&shape, upper, diagonal).unwrap(),
+                expected,
+                "upper={upper}, diagonal={diagonal}",
+            );
+        }
+        assert!(CoremlMlProgramConverter::triangular_band_bounds(&s(&[3]), true, 0).is_err());
+    }
+
+    fn triangular_graph(
+        dtype: DataType,
+        shape: Vec<GraphDimension>,
+        upper: bool,
+        diagonal: i32,
+    ) -> GraphInfo {
+        let descriptor = OperandDescriptor {
+            data_type: dtype,
+            shape,
+            pending_permutation: vec![],
+        };
+        GraphInfo {
+            operands: vec![
+                Operand {
+                    kind: OperandKind::Input,
+                    name: Some("input".into()),
+                    descriptor: descriptor.clone(),
+                },
+                Operand {
+                    kind: OperandKind::Output,
+                    name: Some("result".into()),
+                    descriptor,
+                },
+            ],
+            input_operands: vec![0],
+            output_operands: vec![1],
+            operations: vec![Operation::Triangular {
+                input: 0,
+                options: Some(crate::operator_options::MLTriangularOptions {
+                    upper: Some(upper),
+                    diagonal,
+                    ..Default::default()
+                }),
+                outputs: vec![1],
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn triangular_excluding_main_selects_instead_of_subtracting_input() {
+        for dtype in [DataType::Float16, DataType::Float32] {
+            for (upper, diagonal) in [(true, 1), (false, -1)] {
+                let graph = triangular_graph(dtype, s(&[3, 4]), upper, diagonal);
+                assert_eq!(
+                    main_operation_types(&graph),
+                    ["fill_like", "band_part", "equal", "select"]
+                );
+                let converted = CoremlMlProgramConverter.convert(&graph).unwrap();
+                let block = decode_main_block(&converted.data);
+                let select = block.operations.last().unwrap();
+                assert_eq!(
+                    select.inputs["a"],
+                    CoremlMlProgramConverter::create_argument("input")
+                );
+                let zero = match dtype {
+                    DataType::Float16 => CoremlMlProgramConverter::create_immediate_float16(0.0),
+                    _ => CoremlMlProgramConverter::create_immediate_float(0.0),
+                };
+                assert_eq!(select.inputs["b"], zero);
+                assert_eq!(
+                    block.operations[0].inputs["ref_tensor"],
+                    CoremlMlProgramConverter::create_argument("input")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn triangular_int32_excluding_main_retains_integer_subtraction() {
+        for (upper, diagonal) in [(true, 1), (false, -1)] {
+            let graph = triangular_graph(DataType::Int32, s(&[3, 4]), upper, diagonal);
+            assert_eq!(main_operation_types(&graph), ["band_part", "sub"]);
+        }
+    }
+
+    #[cfg(feature = "dynamic-inputs")]
+    #[test]
+    fn triangular_mask_keeps_symbolic_matrix_dimensions() {
+        let shape = vec![
+            GraphDimension::Static(2),
+            GraphDimension::Dynamic(DynamicDimension {
+                name: "rows".into(),
+                max_size: 8,
+            }),
+            GraphDimension::Dynamic(DynamicDimension {
+                name: "columns".into(),
+                max_size: 8,
+            }),
+        ];
+        let graph = triangular_graph(DataType::Float32, shape.clone(), true, 1);
+        let converted = CoremlMlProgramConverter.convert(&graph).unwrap();
+        let block = decode_main_block(&converted.data);
+        let expected = CoremlMlProgramConverter::mil_dimensions_from_graph_shape(&shape, false);
+        for op in &block.operations {
+            for output in &op.outputs {
+                let Some(crate::protos::coreml::mil_spec::value_type::Type::TensorType(tensor)) =
+                    output
+                        .r#type
+                        .as_ref()
+                        .and_then(|value| value.r#type.as_ref())
+                else {
+                    panic!("expected tensor");
+                };
+                assert_eq!(tensor.dimensions, expected, "{}", op.r#type);
+            }
+        }
     }
 
     fn main_operation_types(graph: &GraphInfo) -> Vec<String> {

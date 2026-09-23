@@ -6,6 +6,8 @@ PNG_PATH ?= target/graph.png
 ONNX_PATH ?= target/graph.onnx
 COREML_PATH ?= target/graph.mlmodel
 COREMLC_PATH ?= target/graph.mlmodelc
+COREML_FEATURES ?= coreml-runtime,dynamic-inputs
+TEST_FILTER ?=
 LITERT_PATH ?= target/graph.tflite
 CANN_PATH ?= target/graph.cann
 OHOS_SDK_NATIVE ?=
@@ -86,7 +88,7 @@ CANN_CROSS_ENV = CC_aarch64_unknown_linux_ohos=$(OHOS_SDK_NATIVE)/llvm/bin/clang
 	coverage coverage-html coverage-lcov coverage-open coverage-clean \
 	docs-serve docs-build docs-clean ci-docs docs-backend-ops docs-backend-ops-check \
 	fetch-wpt require-wpt-cache test-wpt test-wpt-trtx test-wpt-litert test-wpt-coreml \
-	test-wpt-coreml-report test-wpt-op test-wpt-report test-wpt-cann \
+	test-wpt-coreml-report build-coreml test-coreml test-wpt-op test-wpt-report test-wpt-cann \
 	wpt-sync-onnx wpt-sync-litert wpt-sync-coreml wpt-sync-trtx wpt-sync-cann \
 	webnn-chromedriver test-webnn-wpt-chrome test-webnn-wpt-chrome-headless \
 	onnxruntime-download onnx onnx-validate coreml coreml-validate litert cann \
@@ -175,6 +177,15 @@ test-wpt-litert:
 
 test-wpt-coreml:
 	$(CARGO) test --test run_wpt_conformance --features coreml-runtime -- coreml --test-threads 1
+
+# Build every target, including examples and the separately run WPT harness.
+build-coreml:
+	$(CARGO) build --all-targets --no-default-features --features $(COREML_FEATURES)
+
+# Ordinary integration suites use test_*. The live WPT and browser harnesses
+# have their own targets and corpus/device setup; do not run them here.
+test-coreml:
+	$(CARGO) test --lib --bins --test 'test_*' --no-default-features --features $(COREML_FEATURES) -- $(TEST_FILTER) --test-threads=1
 
 test-wpt-coreml-report:
 	@mkdir -p reports
@@ -426,6 +437,9 @@ help:
 	@echo "CoreML Conversion:"
 	@echo "  coreml             - Convert graph to CoreML format"
 	@echo "  coreml-validate    - Convert and validate CoreML graph"
+	@echo "  build-coreml       - Build all targets with CoreML and dynamic inputs (macOS)"
+	@echo "  test-coreml        - Run CoreML unit/integration tests (optional TEST_FILTER=triangular)"
+	@echo "                       Set COREML_FEATURES=coreml-runtime to disable dynamic inputs"
 	@echo ""
 	@echo "LiteRT Conversion:"
 	@echo "  litert             - Convert graph to LiteRT/TFLite format"

@@ -96,16 +96,24 @@ jobs:
       - name: Run cargo check (CANN runtime)
         run: cargo check --features cann-runtime
 
-      - name: Run cargo check (CoreML)
+      - name: Build all targets (CoreML without dynamic-inputs)
         if: runner.os == 'macOS'
-        run: cargo check --features coreml-runtime
+        run: make build-coreml COREML_FEATURES=coreml-runtime
+
+      - name: Build all targets (CoreML with dynamic-inputs)
+        if: runner.os == 'macOS'
+        run: make build-coreml
 
       - name: Run cargo test (library only)
         run: cargo test --lib
 
-      - name: Run cargo test (library only, CoreML)
+      - name: Run CoreML unit and integration tests (without dynamic-inputs)
         if: runner.os == 'macOS'
-        run: cargo test --lib --features coreml-runtime
+        run: make test-coreml COREML_FEATURES=coreml-runtime
+
+      - name: Run CoreML unit and integration tests (with dynamic-inputs)
+        if: runner.os == 'macOS'
+        run: make test-coreml
 
       - name: Run cargo test (library only, CANN mock)
         run: cargo test --lib --features cann-runtime-mock

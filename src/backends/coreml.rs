@@ -120,6 +120,22 @@ fn supports_in_memory_asset(graph: &GraphInfo) -> bool {
         Operation::Neg { input, .. } => graph
             .operand(*input)
             .is_some_and(|operand| operand.descriptor.data_type == DataType::Int32),
+        // Integer triangular subtraction is exact through URL compilation;
+        // the memory path loses low bits of retained int32 values beyond 2^24.
+        Operation::Triangular { input, options, .. } => {
+            let upper = options
+                .as_ref()
+                .and_then(|options| options.upper)
+                .unwrap_or(true);
+            let diagonal = options
+                .as_ref()
+                .map(|options| options.diagonal)
+                .unwrap_or(0);
+            ((upper && diagonal > 0) || (!upper && diagonal < 0))
+                && graph
+                    .operand(*input)
+                    .is_some_and(|operand| operand.descriptor.data_type == DataType::Int32)
+        }
         _ => false,
     })
 }
@@ -427,6 +443,50 @@ mod test {
             Ok(ctx) => Some(ctx),
             Err(crate::error::Error::NoBackendAvailableForBackendHint { .. }) => None,
             Err(e) => panic!("unexpected context creation error: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn triangular_url_compilation_is_limited_to_excluded_main_int32() {
+        use crate::graph::{
+            DataType, GraphInfo, Operand, OperandDescriptor, OperandKind, to_dimension_vector,
+        };
+        use crate::operator_options::MLTriangularOptions;
+        use crate::operators::Operation;
+
+        for dtype in [DataType::Float16, DataType::Float32, DataType::Int32] {
+            for upper in [false, true] {
+                for diagonal in [-1, 0, 1] {
+                    let graph = GraphInfo {
+                        operands: vec![Operand {
+                            kind: OperandKind::Input,
+                            name: Some("input".into()),
+                            descriptor: OperandDescriptor {
+                                data_type: dtype,
+                                shape: to_dimension_vector(&[3, 3]),
+                                pending_permutation: vec![],
+                            },
+                        }],
+                        operations: vec![Operation::Triangular {
+                            input: 0,
+                            options: Some(MLTriangularOptions {
+                                upper: Some(upper),
+                                diagonal,
+                                ..Default::default()
+                            }),
+                            outputs: vec![1],
+                        }],
+                        ..Default::default()
+                    };
+                    let needs_url = dtype == DataType::Int32
+                        && ((upper && diagonal > 0) || (!upper && diagonal < 0));
+                    assert_eq!(
+                        super::supports_in_memory_asset(&graph),
+                        !needs_url,
+                        "{dtype:?}, upper={upper}, diagonal={diagonal}"
+                    );
+                }
+            }
         }
     }
 
