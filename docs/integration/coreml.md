@@ -27,6 +27,17 @@ dispatch. The Objective-C bridge lives in `src/executors/coreml.rs` and `src/exe
 CoreML decides at run time which units execute which layers; the hint is a ceiling, not a
 guarantee. The WPT harness pins `accelerated = false` (CPU) so that results are deterministic.
 
+For the unified `MLContext` path, inspect `graph.rustnn_load_diagnostics()` after
+building and match `LoadDiagnostics::Coreml`. It retains the requested policy, successful policy/route, and earlier errors even
+when CPU-only or URL fallback succeeds. Route preparation errors have no compute-unit policy;
+a deliberately selected URL route is not reported as a failed in-memory attempt. The same
+summary is logged once at debug level under `rustnn::executors::coreml::load`, not per dispatch.
+
+This distinguishes load fallback from CPU scheduling within an accelerator-enabled model.
+It helps investigate sustained CPU thermal throttling without attributing that throttling to
+an unobserved GPU/Neural Engine workload. Neither a successful policy nor this diagnostic
+establishes placement, energy savings or prediction-time fallback; use separate device traces.
+
 ## How a graph runs
 
 1. The converter lowers the graph to a MIL program. Rank-0 operands are promoted to `[1]` at the

@@ -22,6 +22,11 @@ use crate::error::GraphError;
 use crate::graph::{DataType, Dimension, OperandDescriptor, get_static_or_max_size};
 use crate::runtime_checks::{RuntimeShapeState, TensorKind, validate_shape_data_length};
 
+#[path = "coreml_load.rs"]
+mod load;
+use load::LoadTrace;
+pub use load::{CoremlLoadDiagnostics, CoremlLoadFailure, CoremlLoadRoute};
+
 // Link against the system frameworks we use.
 #[cfg(target_os = "macos")]
 #[link(name = "Foundation", kind = "framework")]
@@ -254,6 +259,7 @@ pub(crate) struct CompiledCoremlModel {
     model: *mut Object,
     /// Compute unit the model was successfully loaded with (diagnostic only).
     compute_unit: &'static str,
+    diagnostics: CoremlLoadDiagnostics,
     backing: CoremlModelBacking,
 }
 
@@ -279,6 +285,7 @@ impl std::fmt::Debug for CompiledCoremlModel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompiledCoremlModel")
             .field("compute_unit", &self.compute_unit)
+            .field("diagnostics", &self.diagnostics)
             .finish()
     }
 }
@@ -317,16 +324,9 @@ pub(crate) struct CoremlByteInput<'a> {
     pub(crate) descriptor: &'a OperandDescriptor,
 }
 
-/// Map a [`DeviceType`] to an `MLComputeUnits` raw value.
-///
-/// Apple's `MLComputeUnits`: `cpuOnly = 0`, `cpuAndGPU = 1`, `all = 2`, `cpuAndNeuralEngine = 3`.
-fn compute_unit_for_device(
-    device_type: crate::backend_selection::DeviceType,
-) -> (i64, &'static str) {
-    match device_type {
-        crate::backend_selection::DeviceType::Npu => (3, "CPU_AND_NE"),
-        crate::backend_selection::DeviceType::Gpu => (1, "CPU_AND_GPU"),
-        crate::backend_selection::DeviceType::Cpu => (0, "CPU_ONLY"),
+impl CompiledCoremlModel {
+    pub(crate) fn load_diagnostics(&self) -> &CoremlLoadDiagnostics {
+        &self.diagnostics
     }
 }
 
@@ -343,42 +343,46 @@ pub(crate) fn compile_model(
     // for the URL fallback below even after the NSData objects are released.
     let model_bytes = Arc::new(model_bytes);
     let weights_data = weights_data.map(Arc::new);
-    if !use_in_memory_asset {
-        return compile_model_from_url(
+    let mut trace = LoadTrace::new(device_type);
+    trace.routes(use_in_memory_asset, |trace, route| match route {
+        CoremlLoadRoute::InMemoryAsset => {
+            compile_model_from_asset(&model_bytes, weights_data.as_ref(), trace)
+        }
+        CoremlLoadRoute::CompiledUrl => compile_model_from_url(
             &model_bytes,
             weights_data.as_deref().map(Vec::as_slice),
-            device_type,
-        );
-    }
-    let memory_result = autoreleasepool(|| unsafe {
-        let (asset, specification_data, retained_weights_data) =
-            create_in_memory_model_asset(&model_bytes, weights_data.as_ref())?;
+            trace,
+        ),
+    })
+}
 
-        let (preferred_code, preferred_name) = compute_unit_for_device(device_type);
-        let mut candidates: Vec<(i64, &'static str)> = vec![(preferred_code, preferred_name)];
-        if preferred_code != 0 {
-            candidates.push((0, "CPU_ONLY"));
-        }
-
-        let mut last_error = String::from("MLModel load failed");
-        for (code, name) in candidates {
+fn compile_model_from_asset(
+    model_bytes: &Arc<Vec<u8>>,
+    weights_data: Option<&Arc<Vec<u8>>>,
+    trace: &mut LoadTrace,
+) -> Result<CompiledCoremlModel, GraphError> {
+    let route = CoremlLoadRoute::InMemoryAsset;
+    autoreleasepool(|| unsafe {
+        let (asset, specification_data, retained_weights_data) = trace.prepare(route, || {
+            create_in_memory_model_asset(model_bytes, weights_data)
+        })?;
+        let loaded = trace.policies(route, |code| {
             let config: *mut Object = msg_send![class!(MLModelConfiguration), new];
             let _config_guard = ReleaseOnDrop(config);
             let () = msg_send![config, setComputeUnits: code];
-            match load_model_asset(asset, config) {
-                Ok(model) => {
-                    return Ok(CompiledCoremlModel {
-                        model,
-                        compute_unit: name,
-                        backing: CoremlModelBacking::InMemory {
-                            asset,
-                            specification_data,
-                            weights_data: retained_weights_data,
-                        },
-                    });
-                }
-                Err(reason) => last_error = reason,
-            }
+            load_model_asset(asset, config)
+        });
+        if let Ok((model, name)) = loaded {
+            return Ok(CompiledCoremlModel {
+                model,
+                compute_unit: name,
+                diagnostics: trace.finish(route, name),
+                backing: CoremlModelBacking::InMemory {
+                    asset,
+                    specification_data,
+                    weights_data: retained_weights_data,
+                },
+            });
         }
 
         let _: () = msg_send![asset, release];
@@ -386,40 +390,23 @@ pub(crate) fn compile_model(
         if let Some(weights_data) = retained_weights_data {
             let _: () = msg_send![weights_data, release];
         }
-        Err(GraphError::CoremlRuntimeFailed { reason: last_error })
-    });
-    memory_result.or_else(|memory_error| {
-        compile_model_from_url(
-            &model_bytes,
-            weights_data.as_deref().map(Vec::as_slice),
-            device_type,
-        )
-        .map_err(|url_error| GraphError::CoremlRuntimeFailed {
-            reason: format!(
-                "in-memory model load failed ({memory_error}); URL fallback failed ({url_error})"
-            ),
-        })
+        loaded.map(|_| unreachable!("successful loads return above"))
     })
 }
 
 fn compile_model_from_url(
     model_bytes: &[u8],
     weights_data: Option<&[u8]>,
-    device_type: crate::backend_selection::DeviceType,
+    trace: &mut LoadTrace,
 ) -> Result<CompiledCoremlModel, GraphError> {
+    let route = CoremlLoadRoute::CompiledUrl;
     autoreleasepool(|| unsafe {
-        let (compiled_url, compiled_dir, temp_model) =
-            prepare_compiled_model_with_weights(model_bytes, weights_data, None)?;
+        let (compiled_url, compiled_dir, temp_model) = trace.prepare(route, || {
+            prepare_compiled_model_with_weights(model_bytes, weights_data, None)
+        })?;
         // Owned (+1) by us; released when this function returns on any path.
         let _compiled_url_guard = ReleaseOnDrop(compiled_url);
-        let (preferred_code, preferred_name) = compute_unit_for_device(device_type);
-        let mut candidates = vec![(preferred_code, preferred_name)];
-        if preferred_code != 0 {
-            candidates.push((0, "CPU_ONLY"));
-        }
-
-        let mut last_error = String::from("MLModel load failed");
-        for (code, name) in candidates {
+        let loaded = trace.policies(route, |code| {
             let config: *mut Object = msg_send![class!(MLModelConfiguration), new];
             let _config_guard = ReleaseOnDrop(config);
             let () = msg_send![config, setComputeUnits: code];
@@ -433,14 +420,20 @@ fn compile_model_from_url(
                 error.len(),
             );
             if status != 0 || model.is_null() {
-                last_error = format!("MLModel load failed: {}", shim_error_to_string(&error));
-                continue;
+                return Err(format!(
+                    "MLModel load failed: {}",
+                    shim_error_to_string(&error)
+                ));
             }
+            Ok(model)
+        });
+        if let Ok((model, name)) = loaded {
             // The shim returns an owned (+1) model; `CompiledCoremlModel`'s
             // Drop releases it.
             return Ok(CompiledCoremlModel {
                 model,
                 compute_unit: name,
+                diagnostics: trace.finish(route, name),
                 backing: CoremlModelBacking::OnDisk {
                     compiled_dir,
                     temp_model,
@@ -451,7 +444,7 @@ fn compile_model_from_url(
         let _ = std::fs::remove_dir_all(&compiled_dir);
         // `temp_model` removes its temp path when dropped at end of scope.
         drop(temp_model);
-        Err(GraphError::CoremlRuntimeFailed { reason: last_error })
+        loaded.map(|_| unreachable!("successful loads return above"))
     })
 }
 
