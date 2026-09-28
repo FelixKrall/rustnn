@@ -80,10 +80,14 @@ jobs:
         run: make test-wpt-report || true
 
       - name: Save WPT conformance report for doc deploys
+        # Cache entries are immutable: a fixed key is written once and every later save
+        # fails, so docs deploys would republish the first report forever. Save under a
+        # per-run key; docs.yml and docs-pr.yml restore the newest entry by prefix.
+        if: hashFiles('reports/wpt-conformance.html') != ''
         uses: actions/cache/save@v4
         with:
           path: reports
-          key: wpt-conformance-pages-${{ runner.os }}-latest
+          key: wpt-conformance-pages-${{ runner.os }}-${{ github.run_id }}
 
       - name: Build documentation site
         run: mkdocs build --strict --verbose

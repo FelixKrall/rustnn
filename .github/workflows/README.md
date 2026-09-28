@@ -30,3 +30,11 @@
 GitHub Pages is configured with "GitHub Actions" as the source. `docs.yml` deploys on pushes to
 `main`; the nightly workflow redeploys with fresh conformance data. If a deployment fails with a
 permission error, check Settings -> Actions -> General -> Workflow permissions (read and write).
+
+The nightly saves its `reports/` directory to the Actions cache under
+`wpt-conformance-pages-<os>-<run id>`; `docs.yml` and `docs-pr.yml` restore the newest entry by
+the `wpt-conformance-pages-<os>-` prefix, so a docs deploy republishes the latest nightly
+dashboard rather than a placeholder. Cache entries are immutable: never reuse a fixed key here,
+because the save would fail on every later run and each docs deploy would republish the first
+report forever. Entries that are not restored for seven days are evicted; a docs deploy then
+falls back to the placeholder page until the next successful nightly run.
