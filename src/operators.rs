@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-//! WebNN operator enum: one variant per builder with named operand fields and options.
+//! WebNN operator enum: one variant per recorded graph operation.
 //!
 //! This module defines the `Operation` enum as the single source of truth for each WebNN
 //! operation: each variant carries the builder name, named operand indices (no positional
@@ -43,22 +43,22 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::{
     operator_enums::MLOperandDataType,
     operator_options::{
-        MLArgMinMaxOptions, MLBatchNormalizationOptions, MLClampOptions, MLConstantOptions,
-        MLConv2dOptions, MLConvTranspose2dOptions, MLCumulativeSumOptions, MLDimension,
-        MLEluOptions, MLGatherOptions, MLGemmOptions, MLGruCellOptions, MLGruOptions,
-        MLHardSigmoidOptions, MLInstanceNormalizationOptions, MLLayerNormalizationOptions,
-        MLLeakyReluOptions, MLLinearOptions, MLLstmCellOptions, MLLstmOptions, MLOperatorOptions,
-        MLPadOptions, MLPool2dOptions, MLReduceOptions, MLResample2dOptions, MLReverseOptions,
-        MLScatterOptions, MLSliceOptions, MLSplitOptions, MLSqueezeOptions, MLTransposeOptions,
-        MLTriangularOptions, MLUnsqueezeOptions, OperandIndex, OperationExtras, OperatorOptions,
+        MLArgMinMaxOptions, MLBatchNormalizationOptions, MLClampOptions, MLConv2dOptions,
+        MLConvTranspose2dOptions, MLCumulativeSumOptions, MLDimension, MLEluOptions,
+        MLGatherOptions, MLGemmOptions, MLGruCellOptions, MLGruOptions, MLHardSigmoidOptions,
+        MLInstanceNormalizationOptions, MLLayerNormalizationOptions, MLLeakyReluOptions,
+        MLLinearOptions, MLLstmCellOptions, MLLstmOptions, MLOperatorOptions, MLPadOptions,
+        MLPool2dOptions, MLReduceOptions, MLResample2dOptions, MLReverseOptions, MLScatterOptions,
+        MLSliceOptions, MLSplitOptions, MLSqueezeOptions, MLTransposeOptions, MLTriangularOptions,
+        MLUnsqueezeOptions, OperandIndex, OperationExtras, OperatorOptions,
     },
 };
 
 // ---------------------------------------------------------------------------
-// Operation enum: one variant per WebNN builder
+// Operation enum: one variant per recorded graph operation
 // ---------------------------------------------------------------------------
 
-/// One variant per WebNN graph builder. Each variant has named operand fields and the
+/// One variant per recorded graph operation. Each variant has named operand fields and the
 /// corresponding options struct, so operand roles are explicit and independent of
 /// input_operands order.
 ///
@@ -351,13 +351,6 @@ pub enum Operation {
     Clamp {
         input: OperandIndex,
         options: Option<MLClampOptions>,
-        outputs: Vec<OperandIndex>,
-    },
-
-    // ---------- Constant (no input operands) ----------
-    /// [constant()](https://www.w3.org/TR/webnn/#dom-mlgraphbuilder-constant)
-    Constant {
-        options: Option<MLConstantOptions>,
         outputs: Vec<OperandIndex>,
     },
 
@@ -968,7 +961,6 @@ impl Operation {
             Operation::BatchNormalization { .. } => "batchNormalization",
             Operation::Cast { .. } => "cast",
             Operation::Clamp { .. } => "clamp",
-            Operation::Constant { .. } => "constant",
             Operation::Conv2d { .. } => "conv2d",
             Operation::ConvTranspose2d { .. } => "convTranspose2d",
             Operation::Concat { .. } => "concat",
@@ -1085,7 +1077,6 @@ impl Operation {
             } => vec![*input, *mean, *variance],
             Operation::Cast { input, .. } => vec![*input],
             Operation::Clamp { input, .. } => vec![*input],
-            Operation::Constant { .. } => vec![],
             Operation::Conv2d {
                 input,
                 filter,
@@ -1273,7 +1264,6 @@ impl Operation {
             Operation::BatchNormalization { outputs, .. } => outputs,
             Operation::Cast { outputs, .. } => outputs,
             Operation::Clamp { outputs, .. } => outputs,
-            Operation::Constant { outputs, .. } => outputs,
             Operation::Conv2d { outputs, .. } => outputs,
             Operation::ConvTranspose2d { outputs, .. } => outputs,
             Operation::Concat { outputs, .. } => outputs,
@@ -1400,7 +1390,6 @@ impl Operation {
             Operation::BatchNormalization { options, .. } => opt_label!(options),
             Operation::Cast { options, .. } => opt_label!(options),
             Operation::Clamp { options, .. } => opt_label!(options),
-            Operation::Constant { options, .. } => opt_label!(options),
             Operation::Conv2d { options, .. } => opt_label!(options),
             Operation::ConvTranspose2d { options, .. } => opt_label!(options),
             Operation::Concat { options, .. } => opt_label!(options),
@@ -1889,11 +1878,6 @@ impl Operation {
                 tag.clone(),
                 vec![*input],
                 OO::Clamp(options.clone().unwrap_or_default()),
-            ),
-            Operation::Constant { options, .. } => (
-                tag.clone(),
-                vec![],
-                OO::Constant(options.clone().unwrap_or_default()),
             ),
             Operation::Conv2d {
                 input,
@@ -2579,10 +2563,6 @@ impl Operation {
             "clamp" if !input_operands.is_empty() => Some(Operation::Clamp {
                 input: at(input_operands, 0)?,
                 options: attributes.as_clamp().cloned(),
-                outputs: outputs.to_vec(),
-            }),
-            "constant" => Some(Operation::Constant {
-                options: attributes.as_constant().cloned(),
                 outputs: outputs.to_vec(),
             }),
             "conv2d" if input_operands.len() >= 2 => {

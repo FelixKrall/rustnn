@@ -28,7 +28,7 @@ use crate::converters::{ConvertedGraph, ONNX_EXTERNAL_WEIGHTS_FILENAME, operand_
 use crate::debug_print;
 use crate::error::GraphError;
 use crate::graph::{
-    DataType, Dimension, GraphInfo, OperandKind, get_static_or_max_size, unpack_int4, unpack_uint4,
+    DataType, Dimension, GraphInfo, get_static_or_max_size, unpack_int4, unpack_uint4,
 };
 use crate::operator_enums::MLOperandDataType;
 use crate::operator_options::{MLDimension, MLPool2dOptions, mldimensions_static_or_max};
@@ -43,8 +43,6 @@ use crate::shape_inference::{
     broadcast_shapes, infer_gather_shape, infer_matmul_shape, infer_transpose_shape,
     infer_unsqueeze_shape, infer_where_shape,
 };
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use prost::Message;
 use webnn_onnx_utils::{
     attributes::AttrBuilder, data_types as utils_data_types, operation_names::mapper,
@@ -3135,143 +3133,6 @@ impl crate::converters::GraphConverter for OnnxConverter {
                         continue;
                     }
                 }
-            }
-
-            // WebNN constant() op: encode as initializer, not a node
-            if matches!(&op, Operation::Constant { .. }) {
-                let output_id = op.output_operand().ok_or_else(|| {
-                    Self::invalid_operand("constant output", idx as u32, Some((op, idx)))
-                })?;
-
-                // Get constant data: try 'init' from typed options first, then 'data' (inline base64).
-                let (init_opt, data_opt, dtype_str_opt) = match &op {
-                    Operation::Constant { options, .. } => options
-                        .as_ref()
-                        .map(|o| {
-                            (
-                                o.init.clone(),
-                                o.data.clone(),
-                                (!o.data_type.is_empty()).then(|| o.data_type.clone()),
-                            )
-                        })
-                        .unwrap_or((None, None, None)),
-                    _ => (None, None, None),
-                };
-
-                let data = if let Some(init_ref) = init_opt {
-                    // 'init' attribute references a named constant declaration (e.g., "$_name")
-                    // The operand name in the graph keeps the '$' prefix
-                    debug_print!("[DEBUG] Constant operation with 'init' reference:");
-                    debug_print!("  Operation index: {}", idx);
-                    debug_print!("  Output operand: {}", output_id);
-                    debug_print!("  Init reference: {}", init_ref);
-                    debug_print!("  Looking for constant operand named: {}", init_ref);
-
-                    // Find the constant operand with matching name
-                    // Note: Named constants from the constants{} section have OperandKind::Constant
-                    let const_operand_id = graph
-                        .operands
-                        .iter()
-                        .enumerate()
-                        .find(|(_, op)| {
-                            op.name.as_deref() == Some(init_ref.as_str())
-                                && op.kind == OperandKind::Constant
-                        })
-                        .map(|(id, _)| id as u32)
-                        .ok_or_else(|| {
-                            debug_print!("[DEBUG] Failed to find constant operand:");
-                            debug_print!("  All constant operands:");
-                            for (id, op) in graph.operands.iter().enumerate() {
-                                if op.kind == OperandKind::Constant {
-                                    debug_print!("    ID {}: name={:?}", id, op.name);
-                                }
-                            }
-                            GraphError::ConversionFailed {
-                                format: "onnx".to_string(),
-                                reason: format!(
-                                    "Constant op init='{}' references unknown constant operand",
-                                    init_ref
-                                ),
-                            }
-                        })?;
-
-                    // Look up the constant data
-                    graph
-                        .constant_operand_ids_to_handles
-                        .get(&const_operand_id)
-                        .map(|const_data| const_data.data.clone())
-                        .ok_or_else(|| GraphError::ConversionFailed {
-                            format: "onnx".to_string(),
-                            reason: format!(
-                                "Constant op init='{}' found operand {} but no data in constant_operand_ids_to_handles",
-                                init_ref, const_operand_id
-                            ),
-                        })?
-                } else if let Some(data_b64) = data_opt {
-                    // 'data' attribute contains inline base64-encoded data
-                    STANDARD
-                        .decode(data_b64)
-                        .map_err(|e| GraphError::ConversionFailed {
-                            format: "onnx".to_string(),
-                            reason: format!("Constant op base64 decode failed: {}", e),
-                        })?
-                } else {
-                    debug_print!("[DEBUG] Constant operation missing 'data' or 'init' attribute:");
-                    debug_print!("  Operation index: {}", idx);
-                    debug_print!("  Output operand: {}", output_id);
-                    return Err(GraphError::ConversionFailed {
-                        format: "onnx".to_string(),
-                        reason: "Constant op missing both 'data' and 'init' attributes (use typed options)".to_string(),
-                    });
-                };
-
-                let dtype_str = dtype_str_opt.ok_or_else(|| GraphError::ConversionFailed {
-                    format: "onnx".to_string(),
-                    reason: "Constant op missing 'dataType' attribute".to_string(),
-                })?;
-                let data_type = match dtype_str.to_ascii_lowercase().as_str() {
-                    "float32" => DataType::Float32,
-                    "float16" => DataType::Float16,
-                    "int32" => DataType::Int32,
-                    "uint32" => DataType::Uint32,
-                    "int64" => DataType::Int64,
-                    "uint64" => DataType::Uint64,
-                    "int8" => DataType::Int8,
-                    "uint8" => DataType::Uint8,
-                    "int4" => DataType::Int4,
-                    "uint4" => DataType::Uint4,
-                    other => {
-                        return Err(GraphError::ConversionFailed {
-                            format: "onnx".to_string(),
-                            reason: format!("Unsupported constant dataType '{}'", other),
-                        });
-                    }
-                };
-
-                let shape: Vec<i64> = graph
-                    .operand(output_id)
-                    .ok_or_else(|| {
-                        Self::invalid_operand(
-                            "constant output shape lookup",
-                            output_id,
-                            Some((op, idx)),
-                        )
-                    })?
-                    .descriptor
-                    .static_or_max_shape()
-                    .into_iter()
-                    .map(i64::from)
-                    .collect();
-
-                initializers.push(TensorProto {
-                    name: operand_name(graph, output_id),
-                    data_type: Self::data_type_code(data_type) as i32,
-                    dims: shape,
-                    raw_data: data,
-                    ..Default::default()
-                });
-
-                continue;
             }
 
             let op_name = {

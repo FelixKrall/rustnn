@@ -467,10 +467,6 @@ pub async fn convert_async(context: &MlContext, graph_info: &GraphInfo) -> Resul
                     &to_clamp_options(options)?,
                 )]
             }
-            crate::Operation::Constant {
-                options: _,
-                outputs: _,
-            } => todo!(),
             crate::Operation::Conv2d {
                 input,
                 filter,
@@ -1204,17 +1200,6 @@ fn to_clamp_options(options: &Option<MLClampOptions>) -> Result<MlClampOptions> 
 
     Ok(opts)
 }
-//fn to_constant_options(options: &Option<MLConstantOptions>) -> Result<MLConstantOptions> {
-//let opts = MLConstantOptions::new();
-//if let Some(options) = options {
-//opts.set_label(&options.label);
-//opts.set_keep_dimensions(options.keep_dimensions);
-//opts.set_output_data_type(str_dtype_to_dtype(&options.output_data_type)?);
-//}
-
-//Ok(opts)
-
-//}
 fn to_conv2d_options(
     options: &Option<MLConv2dOptions>,
     operands: &[Option<MlOperand>],

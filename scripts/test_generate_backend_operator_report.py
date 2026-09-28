@@ -21,7 +21,7 @@ impl Operation {
             Operation::Add { .. } => "add",
             Operation::ConvTranspose2d { .. } => "convTranspose2d",
             Operation::IsNaN { .. } => "isNaN",
-            Operation::Constant { .. } => "constant",
+            Operation::Relu { .. } => "relu",
         }
     }
 }

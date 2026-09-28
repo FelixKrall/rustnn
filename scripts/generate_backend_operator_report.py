@@ -34,9 +34,6 @@ LITERT_SRC = ROOT / "src/converters/litert.rs"
 CANN_SRC = ROOT / "src/converters/cann.rs"
 OUTPUT = ROOT / "docs/development/backend-operator-support.md"
 
-# Builder entry points that are not graph operations.
-EXCLUDED_OPS = {"constant"}
-
 # Operations rustnn keeps beyond the current WebNN specification.
 EXTENSION_OPS = {
     "shape": "rustnn extension used by onnx2webnn exports",
@@ -201,10 +198,7 @@ def build_backends(variants: dict[str, str]) -> list[Backend]:
 
 
 def render(variants: dict[str, str], backends: list[Backend]) -> str:
-    operations = sorted(
-        (name for name in variants.values() if name.lower() not in EXCLUDED_OPS),
-        key=lambda s: s.lower(),
-    )
+    operations = sorted(variants.values(), key=lambda s: s.lower())
     keys = {op: normalize(op) for op in operations}
 
     out: list[str] = []

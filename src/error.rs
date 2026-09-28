@@ -98,12 +98,6 @@ pub enum ShapeInferenceError {
         source: GraphError,
     },
 
-    /// Operation had options object missing. Should be fixed by RustNN:\noperation: `operation`.
-    #[error(
-        "Operation had options object missing. Should be fixed by RustNN:\noperation: {operation:#?}"
-    )]
-    MissingOptions { operation: Operation },
-
     /// Invalid split sizes: the number of splits must devide the input rank evenly:\noperation:\n`operation`\ninput:\n`input`.
     #[error(
         "Invalid split sizes: the number of splits must devide the input rank evenly:\noperation:\n{operation:#?}\ninput:\n{input:#?}"

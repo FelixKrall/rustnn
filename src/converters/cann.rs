@@ -152,8 +152,7 @@ pub(crate) fn webnn_op_to_hiai(op: &Operation) -> Option<&'static str> {
         Operation::GlobalMaxPool { .. } => None,
 
         // ── Not supported ─────────────────────────────────────────────
-        Operation::Constant { .. }
-        | Operation::Shape { .. }
+        Operation::Shape { .. }
         | Operation::GatherElements { .. }
         | Operation::ScatterElements { .. }
         | Operation::InstanceNormalization { .. }

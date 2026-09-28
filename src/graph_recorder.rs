@@ -186,9 +186,7 @@ impl Deref for GraphRecorder {
 mod tests {
     use super::*;
     use crate::graph::{DataType, Dimension, DynamicDimension, to_dimension_vector};
-    use crate::operator_options::{
-        MLConstantOptions, MLGruCellOptions, MLGruOptions, MLLstmOptions, MLSplitOptions,
-    };
+    use crate::operator_options::{MLGruCellOptions, MLGruOptions, MLLstmOptions, MLSplitOptions};
 
     fn descriptor(shape: &[u32]) -> OperandDescriptor {
         OperandDescriptor {
@@ -297,43 +295,6 @@ mod tests {
         assert!(error.to_string().contains("Shape inference failed"));
         assert_eq!(recorder.operands.len(), operand_count);
         assert_eq!(recorder.operations.len(), operation_count);
-    }
-
-    #[test]
-    fn constant_shape_distinguishes_scalar_from_missing() {
-        let scalar_options = MLConstantOptions {
-            data_type: "float32".to_string(),
-            shape: Some(vec![]),
-            ..Default::default()
-        };
-        let mut scalar = GraphRecorder::new();
-        scalar
-            .record_operation(
-                Operation::Constant {
-                    options: Some(scalar_options.clone()),
-                    outputs: vec![0],
-                },
-                None,
-            )
-            .unwrap();
-        assert!(scalar.operands[0].descriptor.shape.is_empty());
-
-        let mut missing = GraphRecorder::new();
-        let error = missing
-            .record_operation(
-                Operation::Constant {
-                    options: Some(MLConstantOptions {
-                        shape: None,
-                        ..scalar_options
-                    }),
-                    outputs: vec![0],
-                },
-                None,
-            )
-            .unwrap_err();
-        assert!(error.to_string().contains("missing its required shape"));
-        assert!(missing.operands.is_empty());
-        assert!(missing.operations.is_empty());
     }
 
     #[test]
