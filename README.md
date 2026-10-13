@@ -155,7 +155,7 @@ ownership rules, package layout, and exact build and run commands.
 | `native-examples` | Compiles the large example programs |
 
 Full list and environment variables: crate docs (`make docs-api`) or
-[Backends](docs/user-guide/backends.md).
+[Backends](https://rustnn.github.io/rustnn/api/rustnn/backend_selection/).
 
 ## Command line
 

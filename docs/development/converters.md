@@ -94,8 +94,8 @@ Rules that hold for every converter:
   `constant_only_feeds_casts`). Refit failures raise `TrtxError::ConstantRefitFailed` with the
   operand and its consumers.
 - The engine cache key hashes the converter sources (`build.rs`, `SOURCE_HASH`), so converter
-  edits invalidate cached engines; changes to builder flags do not. Delete the cache directories
-  when in doubt.
+  edits invalidate cached engines. This source hash does not invalidate the separate TensorRT
+  JIT runtime cache. See the [cache guide](https://rustnn.github.io/rustnn/integration/tensorrt/#caches).
 - The nearest-neighbour rounding of `resample2d` is `round_prefer_floor` (`kHALF_DOWN`).
 - `triangular` builds a Boolean keep mask and selects the input or a typed zero. Multiplying by
   a zero mask would propagate NaN and infinity into positions that WebNN requires to be zero.
@@ -122,9 +122,10 @@ Rules that hold for every converter:
 
 - Spatial operations are NHWC. `is_spatial_op` marks operands whose layout changes; filters are
   transposed to OHWI and boundary tensors are transposed by the backend at run time.
-- Operations without a kernel are rejected in `backends::litert::unsupported_ops`, data types
-  without a kernel in `dtype_unsupported_for_op`. The WPT harness uses the same functions to
-  skip trials.
+- The converter rejects unsupported operation/data-type combinations; the runtime can impose
+  further kernel restrictions. See the shared
+  [LiteRT guide](https://rustnn.github.io/rustnn/integration/litert/) and generated support report
+  rather than assuming the WPT skip list is a complete runtime capability query.
 
 ### CANN
 

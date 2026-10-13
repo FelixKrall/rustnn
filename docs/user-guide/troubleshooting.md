@@ -1,7 +1,7 @@
 # Troubleshooting
 
 Errors you are likely to meet, what causes them, and where to look. Error types are described
-in the [API Overview](api-reference.md#errors); `RUST_LOG=debug` adds the backend's own log
+in the [error reference](https://rustnn.github.io/rustnn/api/rustnn/error/); `RUST_LOG=debug` adds the backend's own log
 lines to most of these situations.
 
 ## Context creation
@@ -34,7 +34,7 @@ lines to most of these situations.
 | ``missing runtime input tensor `x` `` / ``unexpected runtime output tensor `y` `` | The binding map lacks a name declared with `MLGraphBuilder::input` or in the outputs passed to `build`, or contains an extra one; names are the binding keys |
 | ``runtime input tensor `x` rank mismatch`` / ``dimension 1 mismatch (expected 2, got 3)`` | The tensor shape differs from the graph descriptor; for dynamic graphs call `rustnn_resize_tensor` before dispatch |
 | ``dynamic dimension `seq` at axis 1 exceeds maxSize`` / ``runtime dynamic dimension `seq` mismatch`` | The bound tensor is larger than the declared `maxSize`, or two tensors sharing a dimension name have different sizes |
-| `operand ... uses unsupported IO data type` / `Backend ... does not support data type` | The tensor or operand data type has no kernel on the selected backend; see the data type table in [Backends](backends.md#data-types) |
+| `operand ... uses unsupported IO data type` / `Backend ... does not support data type` | The tensor or operand data type has no kernel on the selected backend; see the [operator report](../development/backend-operator-support.md) and the relevant integration guide |
 | `Error::DuplicateTensorBinding` | One `MLTensor` appears under two names or as both input and output; use distinct tensors |
 | `Error::WrongWriteSize` / `WrongReadSize` | The host buffer must hold exactly `tensor.rustnn_required_bytes()` bytes |
 | `Error::WriteToNonWritableTensor` / `ReadToNonReadableTensor` | Create the tensor with `to_writable()` or `to_readable()` |

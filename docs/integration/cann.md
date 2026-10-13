@@ -9,7 +9,7 @@ and the backend (`src/backends/cann.rs`) runs it in a HiAI session.
 
 | Feature | Use |
 |---|---|
-| `cann-runtime` | The real backend; only builds for `aarch64-unknown-linux-ohos` with the HiAI DDK |
+| `cann-runtime` | Real device execution requires `aarch64-unknown-linux-ohos` and the HiAI DDK; CI also checks compilation on the host |
 | `cann-runtime-mock` | Compiles the converter and backend without a device; graph builds succeed, dispatch fails. Used by `cargo test --lib --features cann-runtime-mock` in CI |
 
 CANN is never selected automatically: request it with
@@ -56,7 +56,7 @@ and rejects everything else at build time. The CANN column of the generated
 WPT conformance runs on the device as well: `make test-wpt-cann` cross-compiles the harness
 with the corpus embedded (`wpt-embed-corpus` feature), pushes it with the HiAI libraries over
 `hdc`, runs it single-threaded and retrieves the JSON report; `make wpt-sync-cann` regenerates
-`tests/wpt_conformance/cann_expected_failures.txt`. There is no CANN job in CI.
+`tests/wpt_conformance/cann_expected_failures.txt`. CI checks the host build and mock library tests; device WPT requires the OpenHarmony hardware.
 
 ## Conversion without a device
 

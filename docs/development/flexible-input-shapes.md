@@ -28,13 +28,10 @@ whose rules are defined for them and falls back to the maximum size elsewhere
 
 ## Runtime validation
 
-`MLContext::dispatch` and the checked legacy executors enforce, through `src/runtime_checks.rs`:
-
-1. The bound tensor has the descriptor's rank and matches every static dimension.
-2. The actual value of a dynamic dimension does not exceed `maxSize`.
-3. Dynamic dimensions with the same `name` have the same value across all validated inputs and
-   outputs.
-4. The tensor byte length matches the active shape.
+The [runtime-check module](https://rustnn.github.io/rustnn/api/rustnn/runtime_checks/)
+owns the rank, static-dimension, dynamic-bound and shared-name contracts. See
+[MLContext::dispatch](https://rustnn.github.io/rustnn/api/rustnn/mlcontext/struct.MLContext.html#method.dispatch)
+for binding requirements.
 
 ## MLContext API
 
@@ -42,8 +39,9 @@ Tensors bound to dynamic operands are allocated once with a capacity and resized
 
 - `MLContext::rustnn_set_tensor_capacity(&mut tensor, &max_shape)` reserves storage for the
   largest shape the tensor will take.
-- `MLContext::rustnn_resize_tensor(&mut tensor, &shape)` sets the active shape without
-  reallocating; it must fit the capacity.
+- `MLContext::rustnn_resize_tensor(&mut tensor, &shape)` sets the active shape. Staying within reserved
+  capacity avoids reallocation; supported backends may grow storage beyond it. See the
+  [method contract](https://rustnn.github.io/rustnn/api/rustnn/mlcontext/struct.MLContext.html#method.rustnn_resize_tensor).
 
 Backends receive the active shape for each dispatch. `examples/smollm_mlcontext.rs` uses this
 for a growing KV cache: the past key and value tensors start at length 0, get the maximum cache

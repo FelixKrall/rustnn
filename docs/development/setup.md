@@ -15,7 +15,7 @@
 
 Windows: install the Visual Studio C++ build tools and run `git config --system core.longpaths true`
 before cloning. Backend libraries (ONNX Runtime, TensorRT-RTX, LiteRT) are described in
-[Backends](../user-guide/backends.md).
+[Backends](https://rustnn.github.io/rustnn/api/rustnn/backend_selection/).
 
 ### Optional feature prerequisites
 
@@ -125,8 +125,7 @@ Then:
    A backend that cannot support the operation must reject it explicitly (LiteRT:
    `unsupported_ops`; CANN: `is_supported_op`).
 7. WPT: `make test-wpt-op OP=<name>` on every backend you can run, then `make wpt-sync-<backend>`.
-8. `make docs-backend-ops`, and add the method to the operation table in
-   `docs/user-guide/api-reference.md`.
+8. `make docs-backend-ops`, and document the builder method and its option fields in source.
 
 ## Adding a backend
 
@@ -142,8 +141,8 @@ Then:
 5. Tests: a WPT backend entry in `tests/wpt_conformance/wpt_backend.rs`, an expected-failure
    file or snapshots, a `test-wpt-<name>` Make target, an integration test under `tests/`.
 6. Report: a detection rule in `scripts/generate_backend_operator_report.py` and its tests.
-7. Docs: `docs/user-guide/backends.md`, the feature table in `src/lib.rs`, an integration page
-   when setup is involved.
+7. Docs: the feature table in `src/lib.rs`, selection module docs, and a shared integration
+   page when setup is involved.
 
 ## Continuous integration
 
@@ -152,7 +151,7 @@ Then:
 | `ci.yml` | push, pull request | Cargo.lock consistency, `cargo fmt --check`, `cargo check` per feature (including wasm32, and CoreML on macOS), `cargo test --lib` on Linux and macOS plus the CANN mock, rustdoc with `-D warnings`, operator report drift check and generator tests, MkDocs strict build, version check on tags |
 | `wpt-conformance.yml` | push, pull request | WPT suites for ONNX Runtime (Linux), LiteRT (Linux, non-blocking) and CoreML (macOS) |
 | `wpt-conformance-nightly.yml` | schedule | Full WPT run with JSON and HTML reports; publishes the dashboard together with the docs site |
-| `snapshot-sync.yml` | weekly, manual | Regenerates snapshots and expected failures against the pinned WPT revision and opens a pull request |
+| `wpt-sync.yml` | weekly, manual | Regenerates snapshots and expected failures against the pinned WPT revision and opens a pull request |
 | `rustnnpt-gate.yml` | pull request | Runs the external rustnnpt conformance runner against the PR's rustnn and enforces a minimum pass rate |
 | `docs.yml`, `docs-pr.yml` | push to `main`, pull request | MkDocs strict build, rustdoc embedded under `/api/`, WPT report embedded, link check on PRs, deploy to GitHub Pages from `main` |
 | `publish.yml` | GitHub release | fmt, clippy, tests, `cargo publish` |
@@ -163,8 +162,14 @@ contributors run `make test-wpt-trtx` locally before and after changing the conv
 ## Releasing
 
 Bump `version` in `Cargo.toml`, update `Cargo.lock`, tag `vX.Y.Z` and create a GitHub release.
-`publish.yml` verifies that the version matches the tag and publishes to crates.io; docs.rs
-builds the API docs with the features listed under `[package.metadata.docs.rs]`.
+`publish.yml` runs formatting, Clippy and library tests before publishing to crates.io. Check
+that the tag matches the package version. docs.rs builds the API docs with the features listed
+under `[package.metadata.docs.rs]`.
+
+Before publishing, run `cargo package --list` and ensure every Markdown `include_str!` input is
+present, then `cargo package` to verify the packaged crate builds. The active docs are compiler
+inputs; excluding them would break both downstream compilation and docs.rs. Build Rustdoc
+from the extracted package as well when changing shared documentation.
 
 ## Code style
 

@@ -58,12 +58,8 @@ devices found and `Backend selected: Trtx { cuda_device_idx: 0 }`.
 
 Set through `RustNNOptions::trtx` (`TrtxOptions`):
 
-| Field | Default | Effect |
-|---|---|---|
-| `engine_caching` | `true` | Store and reuse stripped engines by topology hash |
-| `runtime_cache` | `true` | Use the shared TensorRT runtime (JIT kernel) cache |
-| `fail_on_cache_miss` | `false` | Never build; fail with `TrtxEngineCacheMiss` when no cached engine exists (ahead-of-time workflows) |
-| `cuda_graphs` | `true` | Capture and replay CUDA graphs for dispatch |
+The [TrtxOptions field documentation](https://rustnn.github.io/rustnn/api/rustnn/mlcontextoptions/struct.TrtxOptions.html)
+owns defaults and option semantics. For example:
 
 ```rust
 use rustnn::mlcontext::{Backend, MLContextOptions, MLPowerPreference, RustNNOptions};

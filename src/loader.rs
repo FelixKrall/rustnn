@@ -1,8 +1,6 @@
-//! Loading `.webnn` text and `webnn-graph` JSON files into a [`GraphInfo`].
+//! Import source graphs and their external weights into [`GraphInfo`].
 //!
-//! Parsing is delegated to the `webnn-graph` crate; this module sanitizes identifiers that
-//! exporters such as onnx2webnn emit, resolves external weight files declared next to the
-//! graph, and runs shape inference on import.
+#![doc = include_str!("../docs/reference/graph-files.md")]
 
 use regex::Regex;
 use std::fs;
@@ -94,11 +92,14 @@ fn map_weight_resolve_error(err: WeightResolveError) -> GraphError {
 /// Load a graph from a webnn-graph file (.webnn text or .json)
 ///
 /// Supports two formats:
-/// - `.webnn` - Text DSL format (parsed and converted to JSON)
+/// - `.webnn` - Text DSL parsed into the shared `GraphJson` representation
 /// - `.json` - Direct JSON format (webnn-graph-json)
 ///
 /// External constants are resolved once through [`webnn_graph::resolve_external_weights`], which
 /// handles both ordinary and packed-4-bit SafeTensors tensors as well as manifest-backed weights.
+/// The graph recorder validates operations and infers shapes. The returned graph owns the resolved
+/// weights; loading neither compiles a backend graph nor compares numerical outputs. Use
+/// [`crate::mlcontext::MLContext::rustnn_build_graph`] to compile it for execution.
 #[tracing::instrument(
     name = "load_graph",
     skip_all,

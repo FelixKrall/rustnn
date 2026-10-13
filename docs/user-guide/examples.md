@@ -111,16 +111,10 @@ Compile once, then loop over `write_tensor`, `dispatch` and `read_tensor`. Tenso
 allocated once as well; the backend keeps them on the device between dispatches. For pipelining
 several inferences with separate tensor sets see `examples/fast_style_transfer_builder_api.rs`.
 
-### Save the graph you built
+### Save and reload a graph
 
-```rust
-builder.rustnn_save_webnn(&outputs, "model.webnn")?;   // also writes model.safetensors
-let reloaded = rustnn::load_graph_from_path("model.webnn")?;
-```
-
-`rustnn_save_webnn` borrows the builder read-only, so it can be called before `build`. The
-`.webnn` file references the weights with `@weights(...)`, and the loader resolves them from
-the sibling file.
+Use the shared [graph-file guide](../reference/graph-files.md) for saving, loading and
+compiling graphs and for the external-weight contracts.
 
 ### Convert to ONNX without a backend
 
@@ -159,7 +153,7 @@ match context.rustnn_device() {
 The hint fixes the backend; the device is still whatever that backend reports for the hints,
 so `accelerated = true` on an ONNX Runtime build without a GPU execution provider prints `Cpu`.
 
-The selection order and the per-backend requirements are described in [Backends](backends.md).
+The selection order and the per-backend requirements are described in [Backends](https://rustnn.github.io/rustnn/api/rustnn/backend_selection/).
 
 ### CoreML KV-cache benchmark
 

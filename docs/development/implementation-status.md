@@ -1,85 +1,29 @@
-# Implementation Status
+# API and support map
 
-This page records which parts of the WebNN API rustnn implements and where the gaps are.
-Counts and pass rates are not repeated here because they are generated:
+Use the references below for API contracts, implementation gaps, and backend support.
+Rustdoc documents unimplemented public methods on the methods themselves; an API appearing
+in Rustdoc does not by itself mean it is implemented. Converter coverage describes available
+lowerings, while WPT results describe tested numerical behavior.
 
-- Operation-by-backend matrix: [Backend Operator Support](backend-operator-support.md), from `make docs-backend-ops`
-- Conformance per operation and backend: [WPT conformance dashboard](https://rustnn.github.io/rustnn/wpt-conformance/), nightly
-- Test baselines: PASS snapshots in `tests/snapshots/` and `tests/wpt_conformance/*_expected_failures.txt`
+This navigation table replaces the former Implementation Status, API Overview, Backends,
+Advanced Topics, and WebNN Specification guides. Graph-file guidance is consolidated below.
 
-## WebNN API surface
-
-| Interface | Implemented | Not implemented or different |
-|---|---|---|
-| `ML`, context creation | `MLContext::create(&MLContextOptions)` with the `powerPreference` and `accelerated` hints | `createContext(GPUDevice)`: `create_from_gpu_device` is a stub |
-| `MLContext` | `createTensor`, `writeTensor`, `readTensor`, `dispatch`, `accelerated`, all synchronous | `lost`, `destroy`, `createConstantTensor` and `opSupportLimits` are stubs (`todo!()`); resources are released by `Drop` |
-| `MLGraphBuilder` | constructor, `input`, `constant` from buffers, every operation of the specification (see below), `build` (synchronous) | `constant` from an `MLTensor` and the scalar `constant(type, value)` form |
-| `MLOperand` | `shape` and `dataType` through a `&GraphInfo` (`MLOperand::shape(graph)`) or the builder (`rustnn_operand_shape`) | The spec exposes them directly on the operand |
-| `MLGraph` | Opaque compiled graph with `input_descriptors` and `output_descriptors` | - |
-| `MLTensor` | `shape`, `dataType`, `readable`, `writable`, `constant` | `destroy` and `isDestroyed` are stubs |
-| Data types | All spec types plus `int4` and `uint4` | - |
-| Asynchrony | None; the JavaScript promises map to blocking calls | An async API is under consideration; the affected methods are marked `//async` in the source |
-
-rustnn extensions, all prefixed `rustnn_` or documented as such: `rustnn_backend`,
-`rustnn_device`, `rustnn_device_type`, `rustnn_set_tensor_capacity`, `rustnn_resize_tensor`,
-`rustnn_save_webnn`, `rustnn_webnn_text_for_outputs`, `rustnn_operand_shape`,
-`rustnn_operand_data_type`, `MLGraphBuilder::new_uncompiled`, `build_graph_info`,
-`finish_graph_info`, and the backend and device hints on `MLContextOptions`.
-
-## Operations
-
-The builder implements every operation method of the W3C WebNN specification as of the copy in
-`docs/reference/webnn-index.bs` (its date is in `docs/reference/README.md`), including the
-recurrent operations `gru`, `gruCell`, `lstm` and `lstmCell` and the 4-bit quantization paths.
-Five additional operations are kept: `globalAveragePool` and `globalMaxPool` from earlier
-drafts, `squeeze` and `unsqueeze` (moved to the specification's emulation appendix and still
-emitted by onnx2webnn) and `shape`, a rustnn extension for onnx2webnn exports.
-
-Backend gaps, from the generated report:
-
-- ONNX Runtime lowers every operation.
-- CoreML and TensorRT-RTX lower everything except the `shape` extension.
-- LiteRT has no recurrent operations (`gru`, `gruCell`, `lstm`, `lstmCell`) and no
-  `globalAveragePool`, `globalMaxPool`, `unsqueeze` or `shape`; several data type combinations
-  are rejected up front (`dtype_unsupported_for_op` in `src/backends/litert.rs`).
-- CANN supports a small subset; the CANN column of the generated report is the list
-  (`is_supported_op` in `src/converters/cann.rs` is its source).
-
-"Supported" means the converter emits a lowering. Numerical conformance per case is what the
-WPT runs report; the remaining CoreML failures, for example, come from negative scatter indices
-and integer precision limits of the hardware rather than from missing lowerings.
-
-## Backends
-
-| Backend | State |
+| Topic | Authoritative reference |
 |---|---|
-| ONNX Runtime | Reference backend; runs the full WPT suite in CI with PASS snapshots |
-| TensorRT-RTX | Native lowering with refittable weights, engine and runtime caches, CUDA graphs. WPT snapshots are maintained by contributors with GPUs; CI only compiles the backend |
-| CoreML | MLProgram lowering; runs the full WPT suite in CI on macOS with an expected-failure list |
-| LiteRT | TFLite lowering; runs in CI (non-blocking) with snapshots and an expected-failure list |
-| CANN | Runs on OpenHarmony devices; mock mode in CI |
-| Browser WebNN (wasm32) | Generated bindings and a graph-compilation test in Chrome; no `MLContext` backend yet |
+| API entry point and first graph | [Crate Rustdoc](https://rustnn.github.io/rustnn/api/rustnn/) |
+| Context operations and unimplemented methods | [MLContext](https://rustnn.github.io/rustnn/api/rustnn/mlcontext/struct.MLContext.html), including [op_support_limits](https://rustnn.github.io/rustnn/api/rustnn/mlcontext/struct.MLContext.html#method.op_support_limits) |
+| Builder operations, naming conventions, and constant-construction gaps | [Builder module](https://rustnn.github.io/rustnn/api/rustnn/mlgraphbuilder/), [MLGraphBuilder](https://rustnn.github.io/rustnn/api/rustnn/mlgraphbuilder/struct.MLGraphBuilder.html) |
+| Tensor access, lifetime, and unimplemented methods | [MLTensor](https://rustnn.github.io/rustnn/api/rustnn/mlcontext/struct.MLTensor.html) |
+| WebNN dictionaries, defaults, and enums | [Options](https://rustnn.github.io/rustnn/api/rustnn/operator_options/), [enums](https://rustnn.github.io/rustnn/api/rustnn/operator_enums/) |
+| Backend selection and feature flags | [Selection rules](https://rustnn.github.io/rustnn/api/rustnn/backend_selection/), [crate features](https://rustnn.github.io/rustnn/api/rustnn/#cargo-features) |
+| Backend setup, caching, precision, and limitations | [TensorRT-RTX](../integration/tensorrt.md), [CoreML](../integration/coreml.md), [LiteRT](../integration/litert.md), [CANN](../integration/cann.md), [browser WebNN](../integration/webnn-browser.md); [ONNX Runtime setup](../user-guide/getting-started.md) |
+| Operations lowered by each backend | [Generated operator support report](backend-operator-support.md) |
+| Tested numerical conformance and remaining failures | [WPT dashboard](https://rustnn.github.io/rustnn/wpt-conformance/), [test and baseline workflow](../testing/wpt-test-guide.md) |
+| Dynamic shapes and tensor capacity | [Dynamic-shape workflow](flexible-input-shapes.md), [runtime validation](https://rustnn.github.io/rustnn/api/rustnn/runtime_checks/) |
+| Graph files, external weights, loading, and saving | [Shared graph-file guide](../reference/graph-files.md) |
+| Backend conversion and graph architecture | [Converter guide](converters.md), [architecture](../architecture/overview.md) |
+| Logging, tracing, and model dumps | [Diagnostics](https://rustnn.github.io/rustnn/api/rustnn/#diagnostics), [environment variables](https://rustnn.github.io/rustnn/api/rustnn/#environment-variables) |
+| Errors and troubleshooting | [Error types](https://rustnn.github.io/rustnn/api/rustnn/error/), [troubleshooting](../user-guide/troubleshooting.md) |
 
-## Known gaps
-
-- Operand fields of option structs (`MLConv2dOptions::bias`, `MLGemmOptions::c`, quantization
-  zero points) are operand indices rather than `MLOperand` values; `MLOperand::rustnn_index()`
-  provides them.
-- Dynamic dimensions are only available for graphs loaded from files and require the
-  `dynamic-inputs` feature; builder descriptors are static.
-- `Int4` and `Uint4` constants cannot be exported to `.safetensors`.
-- The CLI needs a runtime feature at build time.
-- The legacy executors deserialize the model on every call and have no device tensors.
-
-## Conformance tracking
-
-A WPT case is either passing, recorded as a PASS snapshot (`onnx`, `trtx`, `litert`), or listed
-in the backend's expected-failure file (`coreml`, `litert`). The corpus is pinned by
-`WPT_REVISION`; a weekly workflow refreshes snapshots and expectations and opens a pull
-request. See the [WPT Conformance Guide](../testing/wpt-test-guide.md).
-
-## Versioning
-
-rustnn is a `0.5.x` development release. The WebNN API described here is on `main` and not yet
-published; the crates.io release predates it, so consumers use a git dependency. The API
-changes without notice; `CHANGELOG.md` records notable changes per release.
+API comments link to the relevant WebNN specification sections. Consult those comments for
+Rust-specific differences rather than maintaining a separate specification-to-API inventory.

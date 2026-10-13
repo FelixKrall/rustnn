@@ -8,7 +8,7 @@ request template points here.
 
 | Location | Content | Built by | Published at |
 |---|---|---|---|
-| `//!` and `///` comments in `src/` | Rust API reference: every public item (the crate has `#![warn(missing_docs)]`, and CI denies warnings), the crate overview with the feature and environment variable tables in `src/lib.rs`. The backend pages under `docs/integration/` and `docs/development/converters.md` are also included into their modules with `#![doc = include_str!(...)]`, so they render in rustdoc too: use absolute site URLs for links in those pages and a language tag on every code fence (an untagged or `rust` fence becomes a doctest) | `make docs-api` (rustdoc, warnings are errors) | https://rustnn.github.io/rustnn/api/rustnn/ |
+| `//!` and `///` comments in `src/` | Rust API reference: every public item (the crate has `#![warn(missing_docs)]`, and CI denies warnings), the crate overview with the feature and environment variable tables in `src/lib.rs`. The backend pages under `docs/integration/`, `docs/development/converters.md`, and `docs/reference/graph-files.md` are also included into their modules with `#![doc = include_str!(...)]`, so they render in rustdoc too: use absolute site URLs for links in those pages and a language tag on every code fence (an untagged or `rust` fence becomes a doctest) | `make docs-api` (rustdoc, warnings are errors) | https://rustnn.github.io/rustnn/api/rustnn/ |
 | `docs/**/*.md`, `mkdocs.yml` | User guide, architecture, development, testing and integration pages | `make docs-build`; strict mode in CI with `make ci-docs` | https://rustnn.github.io/rustnn/ |
 | `docs/development/backend-operator-support.md` | Operation-by-backend matrix generated from the converter sources | `make docs-backend-ops`; CI fails on drift | same site |
 | `src/capi.rs`, `assets/capi/include/rustnn.hpp`, `Doxyfile` | C and C++ API reference, including the C header generated with cbindgen | `make docs-capi` (Doxygen warnings are errors); embedded by the MkDocs build | https://rustnn.github.io/rustnn/c-api/ |
@@ -16,6 +16,22 @@ request template points here.
 | `README.md` | Front page on GitHub and crates.io | - | - |
 | `AGENTS.md` (imported by `CLAUDE.md`) | Working guide for coding agents: architecture summary, conventions, workflows | - | - |
 | `docs/archive/` | Superseded plans and investigation notes, excluded from the site, read-only | - | - |
+
+## Source of truth
+
+Rustdoc owns API signatures, defaults, error contracts, feature tables and selection rules.
+Guides describe installation and end-to-end workflows and link to the relevant Rustdoc;
+do not maintain parallel operation lists or implementation-status tables. The generated
+operator report and WPT dashboard own support and conformance results respectively.
+
+Shared Markdown is included directly by Rust modules. Use the same file for its MkDocs page,
+absolute links, and explicitly tagged code fences. Keep these inputs in the published crate:
+`cargo package --list` must contain every Markdown path referenced by `include_str!`.
+Active documentation is packaged; archives and the cached specification are excluded.
+
+GitHub Pages builds Rustdoc from the checkout. docs.rs builds from the published package with
+the feature list in `Cargo.toml`; it does not run the website build. The lists currently differ
+because the website also enables LiteRT and CoreML. They share source comments, not release timing.
 
 ## The rule
 
@@ -25,14 +41,14 @@ the same pull request. Documentation follows the code; there is no later cleanup
 | If the change touches | Update |
 |---|---|
 | A public type, method, trait or module | The rustdoc comment of the item (mandatory: `cargo check` warns on undocumented public items and CI fails); the module docs (`//!`) when the module's responsibility changes. Builder operations pass their doc comment into the `impl_*_op!` macro invocation; option fields state meaning, unit and default |
-| A Cargo feature or an environment variable | The tables in `src/lib.rs` and in `docs/user-guide/backends.md`; the backend's page under `docs/integration/` |
-| Backend selection, a backend's requirements or its execution model | The module docs of `src/backend_selection.rs`, `docs/user-guide/backends.md` and the backend's page under `docs/integration/` |
+| A Cargo feature or an environment variable | The tables in `src/lib.rs`; link from integration guides instead of repeating them |
+| Backend selection, a backend's requirements or its execution model | The module docs of `src/backend_selection.rs`; the shared integration page for backend-specific setup |
 | Operator support in a converter (`src/converters/*.rs`) | Run `make docs-backend-ops`, then refresh the WPT snapshots or expected-failure list of that backend (`make wpt-sync-<backend>`) |
 | A lowering rule or a backend constraint in a converter | The backend section of `docs/development/converters.md` |
 | An error variant or a new failure mode | The rustdoc of the variant and, when users will meet it, a row in `docs/user-guide/troubleshooting.md` |
-| The `.webnn`, JSON or weight file handling (`src/loader.rs`, `src/webnn_json.rs`, `src/webnn_save.rs`) | `docs/reference/graph-files.md` |
-| A new operation | The "Adding an operation" checklist in `docs/development/setup.md`, including the operation table in `docs/user-guide/api-reference.md` |
-| The builder or context API (`src/mlgraphbuilder.rs`, `src/mlcontext.rs`) | `docs/user-guide/api-reference.md`; the code in `docs/user-guide/getting-started.md` and `docs/user-guide/examples.md` when it uses the changed call |
+| The `.webnn`, JSON or weight file handling (`src/loader.rs`, `src/webnn_json.rs`, `src/webnn_save.rs`) | The source comments and shared `docs/reference/graph-files.md`; link to `webnn-graph` for format rules |
+| A new operation | The "Adding an operation" checklist in `docs/development/setup.md`, including the method and option-field Rustdoc |
+| The builder or context API (`src/mlgraphbuilder.rs`, `src/mlcontext.rs`) | The affected source comments and crate example; workflow examples only when they use the changed call |
 | Makefile targets, scripts or CI workflows | `docs/development/setup.md` and `.github/workflows/README.md` |
 | The WPT harness (`tests/run_wpt_conformance.rs`, `tests/wpt_conformance/`) | `docs/testing/wpt-test-guide.md` |
 | An example program | `docs/user-guide/examples.md` |

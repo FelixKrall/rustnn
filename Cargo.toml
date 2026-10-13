@@ -11,13 +11,16 @@ homepage = "https://rustnn.github.io/rustnn/"
 documentation = "https://rustnn.github.io/rustnn/api/rustnn/"
 keywords = ["webnn", "onnx", "coreml", "tensorrt", "neural-networks"]
 categories = ["science", "api-bindings"]
+# Keep active docs: public modules include Markdown with include_str! during compilation.
 exclude = [
     "site/*",
-    "docs/*",
+    "/docs/archive/**",
+    "/docs/logo/**",
+    "/docs/reference/webnn-index.bs",
     "tests/*",
     "examples/*",
     ".github/*",
-    "*.md",
+    "/*.md",
     "!README.md",
 ]
 

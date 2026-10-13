@@ -33,6 +33,6 @@ curl -s https://raw.githubusercontent.com/webmachinelearning/webnn/main/index.bs
 
 ## Cross-References
 
-- Implementation status: [docs/development/implementation-status.md](../development/implementation-status.md)
+- Implementation status: [Generated backend operator support](https://rustnn.github.io/rustnn/development/backend-operator-support/)
 - Online spec: https://www.w3.org/TR/webnn/
 - Spec repository: https://github.com/webmachinelearning/webnn

@@ -7,7 +7,7 @@
 //!
 //! Async parts of the JavaScript API (`compute`, `readTensor`, `writeTensor`) are
 //! synchronous here; the corresponding methods are marked `//async` in the source until an
-//! async API is settled. Methods that still `todo!()` are listed in `docs/development/implementation-status.md`.
+//! async API is settled. Unimplemented methods are marked in their own documentation.
 
 #![allow(dead_code, unused_variables)]
 

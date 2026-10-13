@@ -67,6 +67,13 @@
 //! # }
 //! ```
 //!
+//! # Diagnostics
+//!
+//! Library users install their own [`tracing`] subscriber; the CLI installs one filtered by
+//! `RUST_LOG`. Spans identify contexts, graphs, files and calls. Targets are module paths, so
+//! filters can select a backend or subsystem. Instrumented public calls record errors on their
+//! spans before returning them. See the environment variables below for converter dumps.
+//!
 //! # Cargo features
 //!
 //! Backends are opt-in. Without a runtime feature the crate still validates graphs and
